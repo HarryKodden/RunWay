@@ -83,15 +83,39 @@ def clear_oidc_state_cookie(response: Response) -> Response:
     return response
 
 
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0:0:0:0:0:0:0:1"})
+
+
+def _request_hostname(request: Request) -> str:
+    return (request.url.hostname or "").lower().strip("[]")
+
+
 def login_on_callback_host(request: Request) -> RedirectResponse | None:
-    """Keep the session cookie on the same host as OIDC_REDIRECT_URI."""
+    """Keep the session cookie on the same host as OIDC_REDIRECT_URI.
+
+    Only auto-corrects loopback aliases (localhost ↔ 127.0.0.1). Other host
+    mismatches used to 302 forever behind Tailscale/proxies that never present
+    the configured Host header — those now get a clear 400 instead.
+    """
     configured = urlparse(OIDC_REDIRECT_URI)
-    incoming_host = (request.url.hostname or "").lower()
-    expected_host = (configured.hostname or "").lower()
+    incoming_host = _request_hostname(request)
+    expected_host = (configured.hostname or "").lower().strip("[]")
     if not expected_host or incoming_host == expected_host:
         return None
-    target = configured._replace(path="/login", query=request.url.query, fragment="").geturl()
-    return RedirectResponse(url=target, status_code=302)
+    if incoming_host in _LOOPBACK_HOSTS and expected_host in _LOOPBACK_HOSTS:
+        # One-shot bounce so we do not loop if Host stays wrong.
+        if request.query_params.get("host_align") == "1":
+            return None
+        target = configured._replace(path="/login", query="host_align=1", fragment="").geturl()
+        return RedirectResponse(url=target, status_code=302)
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            "Sign-in must use the same host as OIDC_REDIRECT_URI. "
+            f"Open {configured.scheme}://{configured.netloc}/ and try again "
+            f"(this request used host {incoming_host!r})."
+        ),
+    )
 
 oauth = OAuth()
 
