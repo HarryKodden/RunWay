@@ -4,6 +4,10 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>RunWay</title>
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
+    <link rel="icon" href="/static/favicon-32.png" type="image/png" sizes="32x32" />
+    <link rel="apple-touch-icon" href="/static/apple-touch-icon.png" />
+    <meta name="theme-color" content="#10161e" />
     <script>
       (function () {
         try {
@@ -22,13 +26,17 @@
   <body data-release="{{ release }}">
     <header class="topbar">
       <div class="brand">
-        <div class="brand-mark">Run<span>Way</span></div>
-        <div class="brand-sub">Collections, scenarios, one-pass runs</div>
+        <div class="brand-copy">
+          <div class="brand-mark">Run<span>Way</span></div>
+          <div class="brand-sub">Collections, scenarios, one-pass runs</div>
+        </div>
       </div>
       <div class="topbar-actions">
         <div id="auth-bar" class="auth-bar">
+          <span id="auth-user" class="auth-user hidden" aria-live="polite"></span>
           <button id="auth-toggle" class="ghost hidden" type="button">Sign in</button>
         </div>
+        <button id="about-open" class="ghost" type="button">About</button>
         <button id="theme-toggle" class="icon-btn theme-toggle" type="button" aria-label="Switch to light mode" title="Switch to light mode">
           <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
             <circle cx="12" cy="12" r="4"/>
@@ -281,6 +289,31 @@
     </main>
 
     <div id="explorer-menu" class="menu explorer-menu hidden" role="menu"></div>
+
+    <div id="about-dialog" class="json-dialog hidden" role="dialog" aria-modal="true" aria-labelledby="about-dialog-title">
+      <div class="json-dialog-backdrop" data-close="true"></div>
+      <div class="json-dialog-card about-dialog-card">
+        <header class="modal-head section-head">
+          <div class="about-dialog-brand">
+            <div>
+              <h2 id="about-dialog-title">About RunWay</h2>
+              <p class="muted">HTTP/API regression collections, scenarios, and one-pass runs.</p>
+            </div>
+          </div>
+        </header>
+        <div class="about-dialog-body">
+          <p>RunWay is an open source project. Source, issues, and releases live on GitHub:</p>
+          <p>
+            <a id="about-repo-link" href="https://github.com/HarryKodden/RunWay" target="_blank" rel="noopener noreferrer">github.com/HarryKodden/RunWay</a>
+          </p>
+          <p class="muted">Contributions are welcome — pull requests, bug reports, and ideas help improve the project.</p>
+          <p id="about-release" class="about-release muted"></p>
+        </div>
+        <div class="actions row-end">
+          <button id="about-dialog-close" type="button" class="primary">Close</button>
+        </div>
+      </div>
+    </div>
 
     <div id="ask-dialog" class="json-dialog hidden" role="dialog" aria-modal="true" aria-labelledby="ask-dialog-title">
       <div class="json-dialog-backdrop" data-close="true"></div>

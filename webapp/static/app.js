@@ -4598,23 +4598,58 @@ function initTheme() {
 
 initTheme();
 
+function displayUserName(user) {
+  const name = String(user?.name || '').trim();
+  const email = String(user?.email || '').trim();
+  return name || email || 'Signed in';
+}
+
+function openAboutDialog() {
+  const dialog = document.getElementById('about-dialog');
+  const releaseEl = document.getElementById('about-release');
+  if (!dialog) {
+    return;
+  }
+  if (releaseEl) {
+    const release = String(document.body?.dataset?.release || '').trim();
+    releaseEl.textContent = release ? `Release ${release}` : '';
+  }
+  dialog.classList.remove('hidden');
+}
+
+function closeAboutDialog() {
+  document.getElementById('about-dialog')?.classList.add('hidden');
+}
+
 function renderAuthBar() {
   const toggle = document.getElementById('auth-toggle');
+  const userLabel = document.getElementById('auth-user');
   if (!toggle) {
     return;
   }
   if (!authState.oidc_enabled) {
     toggle.classList.add('hidden');
+    userLabel?.classList.add('hidden');
     return;
   }
   toggle.classList.remove('hidden');
   if (authState.authenticated) {
-    const label = authState.user?.name || authState.user?.email || 'Signed in';
+    const label = displayUserName(authState.user);
     toggle.textContent = 'Sign out';
     toggle.title = `Signed in as ${label}`;
+    if (userLabel) {
+      userLabel.textContent = label;
+      userLabel.title = label;
+      userLabel.classList.remove('hidden');
+    }
   } else {
     toggle.textContent = 'Sign in';
     toggle.title = 'Sign in';
+    if (userLabel) {
+      userLabel.textContent = '';
+      userLabel.removeAttribute('title');
+      userLabel.classList.add('hidden');
+    }
   }
   const newItem = document.getElementById('new-item');
   if (newItem) {
@@ -4688,10 +4723,15 @@ document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') {
     closeNewMenu();
     closeExplorerMenu();
+    closeAboutDialog();
   }
 });
 document.getElementById('save-scenario').addEventListener('click', saveScenario);
 document.getElementById('auth-toggle')?.addEventListener('click', toggleAuth);
+document.getElementById('about-open')?.addEventListener('click', openAboutDialog);
+document.getElementById('about-dialog-close')?.addEventListener('click', closeAboutDialog);
+document.getElementById('about-dialog-close-top')?.addEventListener('click', closeAboutDialog);
+document.getElementById('about-dialog')?.querySelector('.json-dialog-backdrop')?.addEventListener('click', closeAboutDialog);
 if (copyCollectionButton) {
   copyCollectionButton.addEventListener('click', () => {
     void copyOpenCollection();
