@@ -242,18 +242,70 @@ def expand_placeholder_defaults(value: str) -> str:
     return PLACEHOLDER_RE.sub(repl, str(value or ""))
 
 
+def expand_meta_placeholders(value: Any, *, environment: str | None = None) -> Any:
+    """Resolve ``meta.environment`` (and leave other placeholders untouched)."""
+    if environment is None:
+        environment = ""
+    context = {"vars": {}, "env": {}, "meta": {"environment": str(environment or "")}}
+    if isinstance(value, str):
+        if "{{" not in value:
+            return value
+
+        def repl(match: re.Match[str]) -> str:
+            name, default = parse_placeholder_token(match.group(1))
+            if not name.startswith("meta."):
+                return match.group(0)
+            resolved = resolve_named_token(name, context, {})
+            if _is_blank_resolved(resolved):
+                return default if default is not None else match.group(0)
+            return "" if resolved is None else str(resolved)
+
+        return PLACEHOLDER_RE.sub(repl, value)
+    if isinstance(value, dict):
+        return {k: expand_meta_placeholders(v, environment=environment) for k, v in value.items()}
+    if isinstance(value, list):
+        return [expand_meta_placeholders(v, environment=environment) for v in value]
+    return value
+
+
+def environment_name_as_base_url(environment: str | None) -> str:
+    """Use the environment name as base URL when it looks like a host or origin.
+
+    Full ``http(s)://…`` names are used as-is. Bare FQDNs (must contain a dot, so
+    names like ``staging`` stay labels only) become ``https://{name}``.
+    """
+    name = str(environment or "").strip()
+    if not name or "{{" in name or " " in name:
+        return ""
+    if name.startswith(("http://", "https://")):
+        if is_forbidden_api_target(name):
+            return ""
+        return name if parse_target_hostname(name) else ""
+    if "/" in name or "://" in name or "." not in name:
+        return ""
+    candidate = f"https://{name}"
+    if is_forbidden_api_target(candidate):
+        return ""
+    return candidate if parse_target_hostname(candidate) else ""
+
+
 def resolve_base_url(scenario: dict[str, Any], selected_environment: str | None) -> str:
     environments = scenario.get("environments") if isinstance(scenario.get("environments"), dict) else {}
     chosen_name = selected_environment or scenario.get("selected_environment")
+    env_name = str(chosen_name or "").strip()
     env_values: dict[str, Any] = {}
     if isinstance(chosen_name, str) and isinstance(environments.get(chosen_name), dict):
         env_values = environments[chosen_name]
-    env_values = expand_environment_values(dict(env_values), keys=CONNECTION_ENV_KEYS)
+    env_values = expand_meta_placeholders(dict(env_values), environment=env_name)
+    env_values = expand_environment_values(env_values, keys=CONNECTION_ENV_KEYS)
     for key in ("server", "base_url", "baseUrl", "url"):
         value = env_values.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
-    base_url = scenario.get("base_url", "")
+    named = environment_name_as_base_url(env_name)
+    if named:
+        return named
+    base_url = expand_meta_placeholders(str(scenario.get("base_url", "") or "").strip(), environment=env_name)
     return str(base_url).strip()
 
 
@@ -344,9 +396,11 @@ def finalize_environment_values(
     values: dict[str, Any] | None,
     *,
     base_url: str | None = None,
+    selected_environment: str | None = None,
 ) -> dict[str, Any]:
     """Expand intra-environment placeholders and encoded companion keys."""
-    prepared = dict(values or {})
+    env_name = str(selected_environment or "").strip()
+    prepared = expand_meta_placeholders(dict(values or {}), environment=env_name)
     prepared = expand_environment_values(prepared, keys=CONNECTION_ENV_KEYS)
     resolved = ""
     for key in ("server", "base_url", "baseUrl", "url"):
@@ -355,9 +409,11 @@ def finalize_environment_values(
             resolved = str(value).strip()
             break
     if not resolved:
-        resolved = (base_url or "").strip()
+        resolved = expand_meta_placeholders(str(base_url or "").strip(), environment=env_name)
         if resolved and is_forbidden_api_target(resolved):
             resolved = ""
+    if not resolved:
+        resolved = environment_name_as_base_url(env_name)
     if resolved:
         prepared["server"] = resolved
         prepared.setdefault("base_url", resolved)
@@ -886,7 +942,8 @@ def build_http_request(
 ) -> dict[str, Any]:
     method = str(step.get("method", "GET")).upper()
     path = render_template(step.get("path") or step.get("url") or "/", context, random_generators)
-    url = absolute_url(base_url, str(path))
+    rendered_base = render_template(base_url or "", context, random_generators)
+    url = absolute_url("" if rendered_base is None else str(rendered_base), str(path))
     headers = render_template(step.get("headers", {}), context, random_generators) or {}
     if not isinstance(headers, dict):
         headers = {}
@@ -1502,7 +1559,11 @@ def execute_scenario(
     if extra_env:
         environment_values = apply_env_overrides(environment_values, extra_env)
     if isinstance(environment_values, dict):
-        environment_values = finalize_environment_values(environment_values, base_url=base_url)
+        environment_values = finalize_environment_values(
+            environment_values,
+            base_url=base_url,
+            selected_environment=selected_environment_name,
+        )
         missing = missing_environment_dependencies(environment_values, steps)
         if missing:
             raise SystemExit(f"Environment variables need a value: {', '.join(missing)}")

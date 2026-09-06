@@ -1653,9 +1653,14 @@ function updateRunAvailability() {
 
 function getSelectedEnvironmentValues() {
   let merged = applySessionEnvOverrides(getRawMergedEnvironment());
+  const envName = getSelectedEnvironmentName();
+  merged = expandMetaPlaceholders(merged, envName);
   merged = expandEnvironmentValues(merged, CONNECTION_ENV_KEYS);
-  const resolvedHost = merged.server || merged.base_url || merged.baseUrl || merged.url
-    || (currentScenario?.base_url || '').trim();
+  let resolvedHost = merged.server || merged.base_url || merged.baseUrl || merged.url
+    || expandMetaPlaceholders((currentScenario?.base_url || '').trim(), envName);
+  if ((!resolvedHost || valueHasEnvPlaceholders(String(resolvedHost))) && environmentNameAsBaseUrl(envName)) {
+    resolvedHost = environmentNameAsBaseUrl(envName);
+  }
   if (resolvedHost) {
     merged.server = merged.server || resolvedHost;
     if (!merged.base_url) {
@@ -1663,6 +1668,39 @@ function getSelectedEnvironmentValues() {
     }
   }
   return applyEncodedCompanions(expandEnvironmentValues(merged));
+}
+
+function expandMetaPlaceholders(value, environmentName) {
+  const envName = String(environmentName || '');
+  if (value == null) {
+    return value;
+  }
+  if (typeof value === 'string') {
+    if (!value.includes('{{')) {
+      return value;
+    }
+    return value.replace(/\{\{\s*([^}]+)\s*\}\}/g, (match, rawToken) => {
+      const {name, defaultValue} = parsePlaceholderToken(rawToken);
+      if (name !== 'meta.environment') {
+        return match;
+      }
+      if (envName) {
+        return envName;
+      }
+      return defaultValue != null ? defaultValue : match;
+    });
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => expandMetaPlaceholders(item, envName));
+  }
+  if (typeof value === 'object') {
+    const next = {};
+    Object.entries(value).forEach(([key, item]) => {
+      next[key] = expandMetaPlaceholders(item, envName);
+    });
+    return next;
+  }
+  return value;
 }
 
 function applyEncodedCompanions(env) {
@@ -1753,9 +1791,16 @@ function getResolvedBaseUrl() {
   const envValues = getSelectedEnvironmentValues();
   const candidate = envValues.server || envValues.base_url || envValues.baseUrl || envValues.url;
   if (typeof candidate === 'string' && candidate.trim()) {
-    return candidate.trim();
+    return expandMetaPlaceholders(candidate.trim(), getSelectedEnvironmentName());
   }
-  return (currentScenario?.base_url || scenarioBaseUrl.value || '').trim();
+  const fallback = expandMetaPlaceholders(
+    (currentScenario?.base_url || scenarioBaseUrl.value || '').trim(),
+    getSelectedEnvironmentName(),
+  );
+  if (fallback && !valueHasEnvPlaceholders(fallback)) {
+    return fallback;
+  }
+  return environmentNameAsBaseUrl(getSelectedEnvironmentName());
 }
 
 function parseRunUrl(rawUrl) {
@@ -1788,9 +1833,13 @@ function stepAbsoluteOrigin(step) {
 }
 
 function requestBaseUrl() {
-  const resolved = getResolvedBaseUrl();
-  const raw = resolved.includes('://') ? resolved : (resolved ? `http://${resolved}` : '');
-  const parsed = raw ? parseRunUrl(raw) : null;
+  const resolved = expandEnvPlaceholders(getResolvedBaseUrl()).trim();
+  if (!resolved || valueHasEnvPlaceholders(resolved) || resolved.includes('{{')) {
+    const step = getSelectedStep() || (currentScenario?.steps || [])[0];
+    return stepAbsoluteOrigin(step);
+  }
+  const raw = resolved.includes('://') ? resolved : `http://${resolved}`;
+  const parsed = parseRunUrl(raw);
   if (parsed?.host) {
     const implicit = (parsed.scheme === 'https' && parsed.port === 443) || (parsed.scheme === 'http' && parsed.port === 80);
     return implicit ? `${parsed.scheme}://${parsed.host}` : `${parsed.scheme}://${parsed.host}:${parsed.port}`;
@@ -2414,6 +2463,20 @@ function addStep() {
   currentScenario.steps.push(createEmptyStep());
   selectedStepIndex = currentScenario.steps.length - 1;
   renderScenarioBuilder();
+}
+
+function environmentNameAsBaseUrl(name) {
+  const text = String(name || '').trim();
+  if (!text || text.includes('{{') || text.includes(' ')) {
+    return '';
+  }
+  if (/^https?:\/\//i.test(text)) {
+    return isAbsoluteHttpUrl(text) ? text : '';
+  }
+  if (text.includes('/') || text.includes('://') || !text.includes('.')) {
+    return '';
+  }
+  return `https://${text}`;
 }
 
 function isAbsoluteHttpUrl(value) {

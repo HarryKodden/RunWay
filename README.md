@@ -286,6 +286,14 @@ Use Insomnia-style placeholders in your step URLs, headers, and bodies:
 
 Use `{{ meta.environment }}` anywhere you would use another placeholder — paths, headers, bodies, or exec commands — when the request should include which environment ran.
 
+If an environment is **named** like a host and has no `server` / `base_url` key, that name becomes the request base URL:
+
+- `https://api.example.org` (or `http://…`) → used as-is
+- bare FQDN `api.example.org` → `https://api.example.org`
+- plain labels like `staging` or `dev` are **not** treated as hosts
+
+You can also set `"server": "{{ meta.environment }}"` explicitly.
+
 A colon after the name sets a default: `{{ name : "value" }}` or `{{ name : 0 }}`. That works in step fields and inside environment values, for example `"user_id": "{{ uid : 0 }}"`. Fill `uid` in **Environment values** to override it; leave it alone to keep `0`.
 
 Environment values can also reference other keys in the same environment. Set a host once and reuse it:

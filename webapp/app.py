@@ -33,7 +33,9 @@ from tools.scenario_runner import (
     apply_collection_defaults,
     discover_parent_collection,
     apply_env_overrides,
+    environment_name_as_base_url,
     expand_environment_values,
+    expand_meta_placeholders,
     expand_placeholder_defaults,
     finalize_environment_values,
     missing_environment_dependencies,
@@ -869,18 +871,9 @@ def _base_url_from_steps(steps: list[dict[str, Any]]) -> str:
 
 
 def _get_scenario_base_url(scenario: dict[str, Any], selected_environment: str | None = None) -> str:
-    environment_values = _resolve_scenario_environment_values(scenario, selected_environment)
-    if isinstance(environment_values, dict):
-        environment_values = expand_environment_values(environment_values)
-    env_url = _resolve_base_url_from_environment(environment_values)
-    if env_url:
-        return env_url
+    from tools.scenario_runner import resolve_base_url
 
-    base_url = scenario.get("base_url")
-    if isinstance(base_url, str) and base_url.strip():
-        return base_url.strip()
-
-    return ""
+    return resolve_base_url(scenario, selected_environment)
 
 
 def _prepare_step_test(payload: dict[str, Any]) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
@@ -904,10 +897,17 @@ def _prepare_step_test(payload: dict[str, Any]) -> tuple[str, dict[str, Any], di
     if not isinstance(steps, list) or not steps:
         raise HTTPException(status_code=400, detail="scenario has no steps")
     selected_environment = payload.get("selected_environment") or scenario.get("selected_environment")
+    env_name = str(selected_environment or "").strip()
+    payload_base = expand_meta_placeholders(str(payload.get("base_url") or "").strip(), environment=env_name)
+    scenario_base = expand_meta_placeholders(
+        _get_scenario_base_url(scenario, selected_environment),
+        environment=env_name,
+    )
     base_url = (
-        _usable_base_url(payload.get("base_url"))
-        or _usable_base_url(_get_scenario_base_url(scenario, selected_environment))
+        _usable_base_url(payload_base)
+        or _usable_base_url(scenario_base)
         or _base_url_from_steps(steps)
+        or environment_name_as_base_url(env_name)
     )
     random_generators = scenario.get("random_generators", {})
     environment_values = _resolve_scenario_environment_values(scenario, selected_environment)
@@ -915,7 +915,11 @@ def _prepare_step_test(payload: dict[str, Any]) -> tuple[str, dict[str, Any], di
     if isinstance(environment_values, dict):
         if isinstance(overrides, dict):
             environment_values = apply_env_overrides(environment_values, overrides)
-        environment_values = finalize_environment_values(environment_values, base_url=base_url)
+        environment_values = finalize_environment_values(
+            environment_values,
+            base_url=base_url,
+            selected_environment=env_name,
+        )
         missing = missing_environment_dependencies(environment_values, steps)
         if missing:
             raise HTTPException(
@@ -934,7 +938,7 @@ def _prepare_step_test(payload: dict[str, Any]) -> tuple[str, dict[str, Any], di
     context = {
         "vars": {"worker_id": 1},
         "env": environment_values,
-        "meta": {"environment": str(selected_environment or "")},
+        "meta": {"environment": env_name},
     }
     return base_url, context, random_generators if isinstance(random_generators, dict) else {}, steps
 

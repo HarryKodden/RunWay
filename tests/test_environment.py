@@ -93,6 +93,40 @@ def test_expand_and_finalize_environment_values():
     assert finalized["base_url"] == "https://staging.example.org"
 
 
+def test_meta_environment_and_url_named_environment_as_server():
+    with_meta = finalize_environment_values(
+        {"server": "{{ meta.environment }}"},
+        selected_environment="https://ta.example.org",
+    )
+    assert with_meta["server"] == "https://ta.example.org"
+    named = finalize_environment_values(
+        {"api_key": "secret"},
+        selected_environment="https://ta.example.org",
+    )
+    assert named["server"] == "https://ta.example.org"
+    fqdn = finalize_environment_values(
+        {"api_key": "secret"},
+        selected_environment="ta.example.org",
+    )
+    assert fqdn["server"] == "https://ta.example.org"
+    label = finalize_environment_values(
+        {"api_key": "secret"},
+        selected_environment="staging",
+    )
+    assert "server" not in label
+    assert (
+        resolve_base_url(
+            {
+                "selected_environment": "https://ta.example.org",
+                "environments": {"https://ta.example.org": {"api_key": "x"}},
+                "base_url": "",
+            },
+            None,
+        )
+        == "https://ta.example.org"
+    )
+
+
 def test_apply_env_overrides_nested_and_blank():
     values = apply_env_overrides({"token": "old", "nested": {"id": "1"}}, {"token": "new", "nested.id": "2", "blank": ""})
     assert values["token"] == "new"
