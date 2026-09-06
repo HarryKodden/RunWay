@@ -1715,6 +1715,12 @@ function expandEnvPlaceholders(value) {
       path = name.slice(4);
     } else if (name.startsWith('_.')) {
       path = name.slice(2);
+    } else if (name === 'meta.environment') {
+      const envName = getSelectedEnvironmentName();
+      if (envName) {
+        return envName;
+      }
+      return defaultValue != null ? defaultValue : match;
     } else if (name.startsWith('vars.') || name.startsWith('random.') || name.startsWith('meta.')) {
       return defaultValue != null ? defaultValue : match;
     }

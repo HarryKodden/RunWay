@@ -931,7 +931,11 @@ def _prepare_step_test(payload: dict[str, Any]) -> tuple[str, dict[str, Any], di
             require_routable_api_targets(environment_values, extra_urls=[base_url])
         except SystemExit as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-    context = {"vars": {"worker_id": 1}, "env": environment_values}
+    context = {
+        "vars": {"worker_id": 1},
+        "env": environment_values,
+        "meta": {"environment": str(selected_environment or "")},
+    }
     return base_url, context, random_generators if isinstance(random_generators, dict) else {}, steps
 
 

@@ -210,10 +210,15 @@ def resolve_named_token(token: str, context: dict[str, Any], random_generators: 
         if generator_config is None:
             return ""
         return build_random_value(generator_config)
-    if token == "meta.now":
-        return now_iso()
-    if token == "meta.unix":
-        return int(time.time())
+    if token.startswith("meta."):
+        key = token[5:]
+        if key == "now":
+            return now_iso()
+        if key == "unix":
+            return int(time.time())
+        meta = context.get("meta") if isinstance(context.get("meta"), dict) else {}
+        value = meta.get(key)
+        return "" if value is None else value
     if token in context.get("env", {}):
         return context["env"][token]
     return ""
@@ -1282,6 +1287,7 @@ def run_worker(
     steps: list[dict[str, Any]],
     random_generators: dict[str, Any],
     environment_values: dict[str, Any],
+    selected_environment: str | None,
     run_until: float,
     max_iterations: int,
     aggregate: dict[str, StepStats],
@@ -1290,7 +1296,11 @@ def run_worker(
     exported_vars: dict[str, Any] | None = None,
 ) -> None:
     session = requests.Session()
-    context = {"vars": {"worker_id": worker_id}, "env": dict(environment_values)}
+    context = {
+        "vars": {"worker_id": worker_id},
+        "env": dict(environment_values),
+        "meta": {"environment": str(selected_environment or "")},
+    }
 
     def capture_vars() -> None:
         if exported_vars is None:
@@ -1486,6 +1496,9 @@ def execute_scenario(
 
     random_generators = scenario.get("random_generators", {})
     environment_values = resolve_environment_values(scenario, environment)
+    selected_environment_name = str(
+        environment or scenario.get("selected_environment") or ""
+    ).strip()
     if extra_env:
         environment_values = apply_env_overrides(environment_values, extra_env)
     if isinstance(environment_values, dict):
@@ -1519,6 +1532,7 @@ def execute_scenario(
                 "steps": steps,
                 "random_generators": random_generators,
                 "environment_values": environment_values,
+                "selected_environment": selected_environment_name,
                 "run_until": run_until,
                 "max_iterations": iterations,
                 "aggregate": aggregate,

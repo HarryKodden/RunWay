@@ -160,7 +160,7 @@ Scenario file capabilities:
 Placeholder examples:
 - `{{ vars.some_id }}` from saved response data
 - `{{ random.request_id }}` from random generator config
-- `{{ meta.now }}` current UTC timestamp
+- `{{ meta.now }}` / `{{ meta.unix }}` / `{{ meta.environment }}` (see meta table below)
 
 ## Importing Scenarios
 
@@ -275,7 +275,16 @@ Use Insomnia-style placeholders in your step URLs, headers, and bodies:
 | `{{ server : "https://api.example.org" }}` | `server` from the environment, or the quoted default if unset |
 | `{{ vars.some_id }}` | saved response field from a previous step |
 | `{{ random.gen_name }}` | configured random generator |
-| `{{ meta.now }}` | current UTC timestamp |
+
+#### Meta placeholders
+
+| Placeholder | Value |
+|---|---|
+| `{{ meta.now }}` | current UTC timestamp (ISO-8601) |
+| `{{ meta.unix }}` | current Unix epoch seconds (integer) |
+| `{{ meta.environment }}` | name of the selected environment (for example `staging`) |
+
+Use `{{ meta.environment }}` anywhere you would use another placeholder — paths, headers, bodies, or exec commands — when the request should include which environment ran.
 
 A colon after the name sets a default: `{{ name : "value" }}` or `{{ name : 0 }}`. That works in step fields and inside environment values, for example `"user_id": "{{ uid : 0 }}"`. Fill `uid` in **Environment values** to override it; leave it alone to keep `0`.
 
@@ -447,6 +456,8 @@ Use these patterns to model realistic API workflows.
 - Reuse nested object field: `{{ vars.response_obj.data.id }}`
 - Random generator value: `{{ random.generator_name }}`
 - Timestamp placeholder: `{{ meta.now }}`
+- Unix epoch placeholder: `{{ meta.unix }}`
+- Selected environment name: `{{ meta.environment }}`
 
 ## Output
 The web UI keeps only the last run in the page: a pass/fail list. It does not write `results/` folders or markdown reports.

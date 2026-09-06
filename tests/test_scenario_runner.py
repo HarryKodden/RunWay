@@ -56,12 +56,17 @@ def test_path_get_and_value_contains():
 
 
 def test_render_template_env_vars_and_meta():
-    context = {"vars": {"user_id": 42}, "env": {"token": "abc"}}
+    context = {"vars": {"user_id": 42}, "env": {"token": "abc"}, "meta": {"environment": "staging"}}
     assert render_template("{{ vars.user_id }}", context, {}) == 42
     assert render_template("Bearer {{ env.token }}", context, {}) == "Bearer abc"
     assert render_template("{{ token }}", context, {}) == "abc"
     now = render_template("{{ meta.now }}", context, {})
     assert isinstance(now, str) and "T" in now
+    unix = render_template("{{ meta.unix }}", context, {})
+    assert isinstance(unix, int) and unix > 0
+    assert render_template("{{ meta.environment }}", context, {}) == "staging"
+    assert render_template("env={{ meta.environment }}", context, {}) == "env=staging"
+    assert render_template('{{ meta.environment : "default" }}', {"vars": {}, "env": {}, "meta": {}}, {}) == "default"
 
 
 def test_render_template_uses_placeholder_defaults():
