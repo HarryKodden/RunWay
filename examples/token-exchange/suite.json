@@ -1,0 +1,39 @@
+{
+  "name": "token-exchange",
+  "description": "RFC 8693 token exchange, translated from token-exchange-demo. Set server to the IdP issuer URL, api_key for dynamic client registration, and redirect_uri to this RunWay origin plus /scenario-auth/callback. Run Tests pauses so you can sign in with a device code or the authorization code flow.",
+  "scenarios": [
+    "token_exchange.json"
+  ],
+  "steps": [],
+  "selected_environment": "idp",
+  "environments": {
+    "idp": {
+      "server": "",
+      "api_key": "",
+      "redirect_uri": "",
+      "insecure_tls": true
+    }
+  },
+  "summary": {
+    "total": 1,
+    "full": 1,
+    "partial": 0,
+    "stub": 0
+  },
+  "manifest": [
+    {
+      "file": "token_exchange.json",
+      "translation_status": "full",
+      "tags": [
+        "oauth",
+        "oidc",
+        "token-exchange",
+        "user-auth"
+      ],
+      "steps": 10,
+      "limitations": [
+        "The sign-in step runs in the web UI. The CLI stops there."
+      ]
+    }
+  ]
+}

@@ -28,6 +28,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from tools.bruno_import import bruno_suggested_name, convert_bruno_collection, is_bruno_collection
 from tools.curl_import import parse_curl_command
 from tools.openapi_import import convert_openapi_document, is_openapi_document, openapi_suggested_name
+from tools.scenario_schema import ScenarioValidationError, validate_scenario_document
 from tools.scenario_runner import (
     apply_save,
     apply_collection_defaults,
@@ -45,6 +46,14 @@ from tools.scenario_runner import (
     parse_target_hostname,
     ROUTABLE_HOST_HELP,
     run_step,
+)
+from tools.interactive_run import (
+    advance_user_auth,
+    begin_user_auth,
+    cancel_user_auth,
+    capture_authorization_callback,
+    scenario_file_needs_user_auth,
+    start_interactive_run,
 )
 from tools.oauth_helpers import stop_cimd_metadata_servers
 from authlib.integrations.base_client.errors import MismatchingStateError, OAuthError
@@ -378,6 +387,15 @@ def get_scenario(path: str = Query(..., min_length=1)) -> JSONResponse:
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Invalid scenario JSON: {exc}") from exc
     return _json(payload)
+
+
+@app.post("/api/scenarios/validate")
+def validate_scenario(payload: dict[str, Any]) -> dict[str, str]:
+    try:
+        validate_scenario_document(payload)
+    except ScenarioValidationError as exc:
+        raise HTTPException(status_code=400, detail={"errors": exc.errors}) from exc
+    return {"status": "ok"}
 
 
 @app.post("/api/scenarios/file")
@@ -943,6 +961,18 @@ def _prepare_step_test(payload: dict[str, Any]) -> tuple[str, dict[str, Any], di
     return base_url, context, random_generators if isinstance(random_generators, dict) else {}, steps
 
 
+def _saved_vars(before: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+    """Variables this step wrote. Omits the runner's worker_id seed."""
+    after = context.get("vars") if isinstance(context.get("vars"), dict) else {}
+    saved: dict[str, Any] = {}
+    for key, value in after.items():
+        if key == "worker_id":
+            continue
+        if key not in before or before[key] != value:
+            saved[key] = value
+    return saved
+
+
 def _step_test_record(
     step: dict[str, Any],
     index: int,
@@ -1154,6 +1184,21 @@ def start_run(
             extra_env_path.write_text(json.dumps(overrides), encoding="utf-8")
             cmd.extend(["--scenario-extra-env", str(extra_env_path)])
 
+        run_path = Path(run_file)
+        if not run_path.is_absolute():
+            run_path = (ROOT / run_path).resolve()
+        base_override = f"{scheme}://{host}:{port}" if host else ""
+        if scenario_file_needs_user_auth(run_path):
+            try:
+                return start_interactive_run(
+                    run_path,
+                    environment=scenario_environment or None,
+                    extra_env=overrides if isinstance(overrides, dict) else {},
+                    base_url_override=base_override or None,
+                )
+            except SystemExit as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+
         # Ensure the subprocess inherits the current venv so python3 resolves correctly
         venv_bin = Path(sys.executable).parent
         env = os.environ.copy()
@@ -1180,6 +1225,76 @@ def start_run(
         if proc.returncode != 0 and not summary:
             raise HTTPException(status_code=500, detail=payload_out)
         return payload_out
+
+
+def _interactive_http_error(exc: Exception) -> HTTPException:
+    status = 404 if isinstance(exc, KeyError) else 400
+    return HTTPException(status_code=status, detail=str(exc))
+
+
+@app.post("/api/runs/interactive/{session_id}/begin")
+def interactive_begin(session_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return begin_user_auth(session_id, str((payload or {}).get("flow") or ""))
+    except (KeyError, ValueError) as exc:
+        raise _interactive_http_error(exc) from exc
+
+
+@app.post("/api/runs/interactive/{session_id}/advance")
+def interactive_advance(session_id: str) -> dict[str, Any]:
+    try:
+        return advance_user_auth(session_id)
+    except (KeyError, ValueError, SystemExit) as exc:
+        raise _interactive_http_error(exc) from exc
+
+
+@app.post("/api/runs/interactive/{session_id}/cancel")
+def interactive_cancel(session_id: str) -> dict[str, Any]:
+    try:
+        return cancel_user_auth(session_id)
+    except KeyError as exc:
+        raise _interactive_http_error(exc) from exc
+
+
+def _scenario_auth_callback_page(message: str, ok: bool) -> str:
+    flag = "true" if ok else "false"
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Sign-in</title>
+</head>
+<body>
+  <p>{message}</p>
+  <script>
+    if (window.opener) {{
+      window.opener.postMessage({{type: "runway-user-auth", ok: {flag}}}, window.location.origin);
+    }}
+    setTimeout(function () {{ window.close(); }}, 400);
+  </script>
+</body>
+</html>
+"""
+
+
+@app.get("/scenario-auth/callback", response_class=HTMLResponse)
+def scenario_auth_callback(request: Request) -> HTMLResponse:
+    matched = capture_authorization_callback(
+        state=request.query_params.get("state") or "",
+        code=request.query_params.get("code"),
+        error=request.query_params.get("error"),
+        error_description=request.query_params.get("error_description"),
+    )
+    if request.query_params.get("error"):
+        message = "Sign-in was cancelled or rejected. Return to RunWay."
+        ok = False
+    elif matched:
+        message = "Sign-in complete. You can return to RunWay."
+        ok = True
+    else:
+        message = "This sign-in could not be matched to a RunWay run. Start the scenario again."
+        ok = False
+    return HTMLResponse(_scenario_auth_callback_page(message, ok))
 
 
 @app.post("/api/test-step")
@@ -1218,6 +1333,7 @@ def test_step(payload: dict[str, Any]) -> dict[str, Any]:
         step = steps[step_index]
         if not isinstance(step, dict):
             raise HTTPException(status_code=400, detail="selected step is invalid")
+        before_vars = dict(context.get("vars") or {})
         success, expected_mismatch, latency_ms, response_json, response = run_step(
             session=session,
             step=step,
@@ -1229,13 +1345,17 @@ def test_step(payload: dict[str, Any]) -> dict[str, Any]:
             apply_save(step=step, response_json=response_json, response=response, context=context)
 
         record = _step_test_record(step, step_index, success, expected_mismatch, latency_ms, response_json, response)
+        saved = _saved_vars(before_vars, context)
         response_body: Any = None
         response_headers: dict[str, str] = {}
         if response is not None:
             response_headers = dict(response.headers)
             response_body = response_json if response_json is not None else response.text
+        elif response_json is not None:
+            response_body = response_json
         return {
             "status": "ok",
+            "saved": saved,
             "base_url": base_url,
             "step_name": record["name"],
             "success": success,
@@ -1306,6 +1426,7 @@ def test_sequence(payload: dict[str, Any]) -> dict[str, Any]:
         for index, step in enumerate(steps):
             if not isinstance(step, dict):
                 continue
+            before_vars = dict(context.get("vars") or {})
             success, expected_mismatch, latency_ms, response_json, response = run_step(
                 session=session,
                 step=step,
@@ -1315,9 +1436,9 @@ def test_sequence(payload: dict[str, Any]) -> dict[str, Any]:
             )
             if response is not None:
                 apply_save(step=step, response_json=response_json, response=response, context=context)
-            results.append(
-                _step_test_record(step, index, success, expected_mismatch, latency_ms, response_json, response)
-            )
+            record = _step_test_record(step, index, success, expected_mismatch, latency_ms, response_json, response)
+            record["saved"] = _saved_vars(before_vars, context)
+            results.append(record)
         passed = sum(1 for item in results if item.get("success"))
         return {
             "status": "ok",

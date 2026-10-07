@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
+from tools.scenario_schema import ScenarioValidationError, validate_scenario_document
 from webapp.auth import current_user_required
 from webapp.db import get_db
 from webapp.models import Collection, CollectionEnvValue, CollectionShare, Scenario, User
@@ -682,6 +683,10 @@ def save_workspace_file(
     if is_collection_filename(filename) or is_collection_document(cleaned):
         apply_collection_fields(collection, cleaned)
         return {"status": "saved", "path": workspace_collection_path(collection.id)}
+    try:
+        validate_scenario_document(cleaned)
+    except ScenarioValidationError as exc:
+        raise HTTPException(status_code=400, detail={"errors": exc.errors}) from exc
     filename = safe_filename(filename)
     scenario = next((item for item in collection.scenarios if item.name == filename), None)
     if scenario is None:

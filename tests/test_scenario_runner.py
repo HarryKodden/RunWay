@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import requests
+
 from tools.scenario_runner import (
     apply_save,
     build_http_request,
+    configure_http_session,
     evaluate_expectations,
     exported_context_vars,
     format_curl_command,
@@ -120,7 +123,8 @@ def test_apply_save_and_expectations():
     apply_save(
         {
             "save": {
-                "user_id": "json.id",
+                "user_id": "{{ json.id }}",
+                "user_name": "{{ json.name }}",
                 "auth": "headers.Authorization",
                 "code": "url_query.code",
                 "status": "status_code",
@@ -134,6 +138,7 @@ def test_apply_save_and_expectations():
         body_text='{"id":5}',
     )
     assert context["vars"]["user_id"] == 5
+    assert context["vars"]["user_name"] == "Ada"
     assert context["vars"]["auth"] == "Bearer xyz"
     assert context["vars"]["code"] == "99"
     assert context["vars"]["status"] == 201
@@ -154,6 +159,23 @@ def test_exported_context_vars_and_status_list():
     assert exported_context_vars({"user_id": 5, "other": 1}, ["user_id"]) == {"user_id": 5}
     assert to_status_list(201) == [201]
     assert to_status_list([200, "201"]) == [200, 201]
+
+
+def test_insecure_tls_disables_certificate_checks(monkeypatch):
+    session = requests.Session()
+    configure_http_session(session, {})
+    assert session.verify is True
+    configure_http_session(session, {"insecure_tls": True})
+    assert session.verify is False
+    configure_http_session(session, {"insecure_tls": "false"})
+    assert session.verify is True
+    monkeypatch.setenv("RUNWAY_INSECURE_TLS", "true")
+    configure_http_session(session, {})
+    assert session.verify is False
+    configure_http_session(session, {"insecure_tls": False})
+    assert session.verify is True
+    curl = format_curl_command("GET", "https://oauth2-server.k3s.lab/.well-known/openid-configuration", insecure=True)
+    assert "curl -sS -k -X GET" in curl
 
 
 def test_format_curl_and_preview_absolute_step():

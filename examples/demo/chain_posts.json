@@ -11,8 +11,8 @@
       "stop_on_failure": true,
       "expected_status": 200,
       "save": {
-        "post_id": "json.0.id",
-        "post_title": "json.0.title"
+        "post_id": "{{ json.0.id }}",
+        "post_title": "{{ json.0.title }}"
       }
     },
     {

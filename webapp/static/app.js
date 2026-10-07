@@ -28,10 +28,13 @@ const editRandomGeneratorsJsonButton = document.getElementById('edit-random-gene
 const editEnvironmentsJsonButton = document.getElementById('edit-environments-json');
 const jsonDialog = document.getElementById('json-dialog');
 const jsonDialogTitle = document.getElementById('json-dialog-title');
+const jsonDialogHelp = document.getElementById('json-dialog-help');
 const jsonDialogEditor = document.getElementById('json-dialog-editor');
+const jsonDialogError = document.getElementById('json-dialog-error');
 const jsonDialogCancelButton = document.getElementById('json-dialog-cancel');
 const jsonDialogCancelTopButton = document.getElementById('json-dialog-cancel-top');
 const jsonDialogSaveButton = document.getElementById('json-dialog-save');
+const editScenarioJsonButton = document.getElementById('edit-scenario-json');
 const stepSequence = document.getElementById('step-sequence');
 const stepCount = document.getElementById('step-count');
 const selectedStepLabel = document.getElementById('selected-step-label');
@@ -48,6 +51,8 @@ const editStepHeadersJsonButton = document.getElementById('edit-step-headers-jso
 const editStepJsonButton = document.getElementById('edit-step-json');
 const editStepSaveJsonButton = document.getElementById('edit-step-save-json');
 const editStepExpectedJsonButton = document.getElementById('edit-step-expected-json');
+const editStepUserAuthJsonButton = document.getElementById('edit-step-user-auth-json');
+const stepUserAuthNote = document.getElementById('step-user-auth-note');
 const stepFollowRedirectsInput = document.getElementById('step-follow-redirects');
 const stepStopOnFailureInput = document.getElementById('step-stop-on-failure');
 const stepMoveUpButton = document.getElementById('step-move-up');
@@ -97,8 +102,10 @@ let selectedStepIndex = -1;
 let draggedStepIndex = -1;
 let currentJsonDialogTarget = null;
 let lastStepContextVars = {};
+let stepSavedVars = {};
 let stepCurlTimer = null;
 let stepCurlGeneration = 0;
+let stepCurlAbort = null;
 let lastHydratedCurlKey = '';
 let lastCopiedCurl = '';
 let authState = {authenticated: false, oidc_enabled: false, user: null};
@@ -184,12 +191,20 @@ async function api(path, options = {}) {
   if (method === 'GET') {
     url += `${path.includes('?') ? '&' : '?'}_=${Date.now()}`;
   }
-  const response = await fetch(url, {
-    cache: 'no-store',
-    credentials: 'same-origin',
-    headers: {'Content-Type': 'application/json', ...extraHeaders},
-    ...rest,
-  });
+  let response;
+  try {
+    response = await fetch(url, {
+      cache: 'no-store',
+      credentials: 'same-origin',
+      headers: {'Content-Type': 'application/json', ...extraHeaders},
+      ...rest,
+    });
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      throw error;
+    }
+    throw new Error('Could not reach RunWay. Check that this page can still reach the server, then try again.');
+  }
   if (response.status === 401 && authState.oidc_enabled) {
     window.location.href = '/login';
     throw new Error('Sign in required');
@@ -838,7 +853,7 @@ function parsePlaceholderToken(raw) {
 
 function envPlaceholderPath(token) {
   const {name} = parsePlaceholderToken(token);
-  if (!name || name.startsWith('vars.') || name.startsWith('random.') || name.startsWith('meta.')) {
+  if (!name || name.startsWith('vars.') || name.startsWith('random.') || name.startsWith('meta.') || name.startsWith('json.') || name.startsWith('headers.') || name.startsWith('url_query.') || name.startsWith('location_query.')) {
     return null;
   }
   if (name.startsWith('env.')) {
@@ -1057,6 +1072,18 @@ function clearSessionEnvOverrides() {
   scheduleWorkspaceEnvPersist();
 }
 
+function setEnvPersistStatus(message) {
+  const help = document.getElementById('session-env-help');
+  if (!help) {
+    return;
+  }
+  if (!help.dataset.defaultText) {
+    help.dataset.defaultText = help.textContent || '';
+  }
+  help.textContent = message || help.dataset.defaultText;
+  help.classList.toggle('env-persist-error', Boolean(message));
+}
+
 function scheduleWorkspaceEnvPersist() {
   if (!isWorkspacePath(activeCollectionPath || selectedScenarioName || '')) {
     return;
@@ -1073,13 +1100,22 @@ async function persistWorkspaceEnvValues() {
   if (!collectionId || !environment || !authState.authenticated) {
     return;
   }
-  await api(`/api/workspace/collections/${encodeURIComponent(collectionId)}/env`, {
-    method: 'PUT',
-    body: JSON.stringify({
-      environment,
-      values: environmentOverridesPayload(),
-    }),
-  });
+  stepCurlAbort?.abort();
+  try {
+    await api(`/api/workspace/collections/${encodeURIComponent(collectionId)}/env`, {
+      method: 'PUT',
+      body: JSON.stringify({
+        environment,
+        values: environmentOverridesPayload(),
+      }),
+    });
+    setEnvPersistStatus('');
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      return;
+    }
+    setEnvPersistStatus(error?.message || 'Could not save environment values.');
+  }
 }
 
 async function loadWorkspaceEnvValues() {
@@ -1362,7 +1398,7 @@ function missingEnvDependencies(applySession) {
 
 function isNonHttpStep(step) {
   const method = String(step?.method || 'GET').toUpperCase();
-  return method === 'PREPARE' || method === 'SLEEP' || method === 'EXEC';
+  return method === 'PREPARE' || method === 'SLEEP' || method === 'EXEC' || method === 'USER_AUTH';
 }
 
 function stepsNeedSharedBaseUrl(steps) {
@@ -1571,7 +1607,12 @@ function renderRequiredEnvPanel() {
     const defaultValue = defaults.get(name);
     input.placeholder = defaultValue != null
       ? defaultValue
-      : (CONNECTION_ENV_KEYS.has(name) ? 'http://192.168.1.10:8080' : `Value for ${name}`);
+      : (name === 'redirect_uri'
+        ? `${window.location.origin}/scenario-auth/callback`
+        : (CONNECTION_ENV_KEYS.has(name) ? 'http://192.168.1.10:8080' : `Value for ${name}`));
+    if (name === 'api_key' || name.endsWith('_secret')) {
+      input.type = 'password';
+    }
     input.addEventListener('input', () => {
       setSessionEnvOverride(name, input.value);
       updateRunAvailability();
@@ -1759,7 +1800,7 @@ function expandEnvPlaceholders(value) {
         return envName;
       }
       return defaultValue != null ? defaultValue : match;
-    } else if (name.startsWith('vars.') || name.startsWith('random.') || name.startsWith('meta.')) {
+    } else if (name.startsWith('vars.') || name.startsWith('random.') || name.startsWith('meta.') || name.startsWith('json.') || name.startsWith('headers.') || name.startsWith('url_query.') || name.startsWith('location_query.')) {
       return defaultValue != null ? defaultValue : match;
     }
     let resolved = lookupEnvPath(env, path);
@@ -1783,6 +1824,11 @@ function stepDisplaySummary(step) {
   }
   if (method === 'EXEC') {
     return expandEnvPlaceholders(step.command || step.exec || '');
+  }
+  if (method === 'USER_AUTH') {
+    const flows = step.user_auth?.flows;
+    const label = Array.isArray(flows) && flows.length ? flows.join(' or ') : 'device code or authorization code';
+    return `Sign in · ${label}`;
   }
   return `${method} ${expandEnvPlaceholders(step.path || step.url || '/')}`;
 }
@@ -1934,6 +1980,30 @@ function parseOptionalJson(value, fieldName) {
   } catch (error) {
     throw new Error(`${fieldName} must contain valid JSON`);
   }
+}
+
+function formatRequestError(error) {
+  const text = String(error?.message || error || 'Request failed');
+  try {
+    const body = JSON.parse(text);
+    const detail = body?.detail;
+    if (detail && Array.isArray(detail.errors) && detail.errors.length) {
+      return detail.errors.join('\n');
+    }
+    if (typeof detail === 'string' && detail) {
+      return detail;
+    }
+  } catch {
+    // The response body is already plain text.
+  }
+  return text;
+}
+
+async function validateScenarioDocument(document) {
+  await api('/api/scenarios/validate', {
+    method: 'POST',
+    body: JSON.stringify(document),
+  });
 }
 
 function getValidatedScenarioPayload() {
@@ -2120,8 +2190,51 @@ function renderStepSequence() {
   });
 }
 
+function savedVarsFromResult(result) {
+  if (result?.saved && typeof result.saved === 'object' && !Array.isArray(result.saved)) {
+    return result.saved;
+  }
+  return {};
+}
+
+function formatSavedVarBlock(saved) {
+  const entries = Object.entries(saved || {}).filter(([key]) => key !== 'worker_id');
+  if (!entries.length) {
+    return '';
+  }
+  const lines = ['Saved variables'];
+  for (const [key, value] of entries) {
+    const shown = typeof value === 'string' ? value : JSON.stringify(value);
+    lines.push(`  ${key} = ${shown ?? ''}`);
+  }
+  return lines.join('\n');
+}
+
+function savedVarComments(saved) {
+  const lines = Object.entries(saved || {})
+    .filter(([key]) => key !== 'worker_id')
+    .map(([key, value]) => `# saved ${key}=${typeof value === 'string' ? value : JSON.stringify(value)}`);
+  return lines.length ? `\n${lines.join('\n')}` : '';
+}
+
 function renderTestStepResult(result) {
-  stepTestOutput.textContent = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
+  if (typeof result === 'string') {
+    stepTestOutput.textContent = result;
+    return;
+  }
+  const parts = [];
+  if (result && result.success === false) {
+    const detail = typeof result.response_body === 'string'
+      ? result.response_body
+      : (result.response_body ? JSON.stringify(result.response_body) : 'The request did not return a response.');
+    parts.push(`Step failed\n  ${detail}`);
+  }
+  const saved = formatSavedVarBlock(savedVarsFromResult(result));
+  if (saved) {
+    parts.push(saved);
+  }
+  parts.push(JSON.stringify(result, null, 2));
+  stepTestOutput.textContent = parts.join('\n\n');
 }
 
 function renderStepDetail() {
@@ -2166,9 +2279,13 @@ function renderStepDetail() {
   stepExpectedStatusInput.value = formatExpectedStatus(step.expected_status);
   stepSaveResponseAsInput.value = step.save_response_as || '';
   syncJsonFieldButton(editStepHeadersJsonButton, step.headers);
-  syncJsonFieldButton(editStepJsonButton, step.json);
+  syncJsonFieldButton(editStepJsonButton, step.json !== undefined ? step.json : step.data);
   syncJsonFieldButton(editStepSaveJsonButton, step.save);
   syncJsonFieldButton(editStepExpectedJsonButton, step.expected_json_contains);
+  syncJsonFieldButton(editStepUserAuthJsonButton, step.user_auth);
+  const userAuthStep = String(step.method || '').toUpperCase() === 'USER_AUTH';
+  editStepUserAuthJsonButton?.classList.toggle('hidden', !userAuthStep);
+  stepUserAuthNote?.classList.toggle('hidden', !userAuthStep);
   if (stepFollowRedirectsInput) {
     stepFollowRedirectsInput.checked = Boolean(step.follow_redirects);
   }
@@ -2201,7 +2318,8 @@ function getJsonDialogConfig(target) {
         syncRemovedEnvKeys(previous, next);
         if (isCollectionDocument(currentScenario) || !activeCollectionDocument) {
           currentScenario.environments = next;
-        } else {
+        }
+        if (activeCollectionDocument) {
           activeCollectionDocument.environments = next;
         }
         const names = Object.keys(next);
@@ -2257,8 +2375,17 @@ function getJsonDialogConfig(target) {
     return {
       title: 'Edit Step Request Body JSON',
       fieldName: 'Request JSON body',
-      currentValue: () => step.json,
+      currentValue: () => (step.json !== undefined ? step.json : step.data),
       apply: (parsed) => {
+        const usesData = step.json === undefined && step.data !== undefined;
+        if (usesData) {
+          if (parsed === undefined) {
+            delete step.data;
+            return;
+          }
+          step.data = parsed;
+          return;
+        }
         if (parsed === undefined) {
           delete step.json;
           return;
@@ -2283,6 +2410,22 @@ function getJsonDialogConfig(target) {
       },
     };
   }
+  if (target === 'step_user_auth') {
+    const step = getSelectedStep();
+    if (!step) throw new Error('Select a step first.');
+    return {
+      title: 'Edit Sign-in Settings',
+      fieldName: 'Sign-in settings',
+      currentValue: () => step.user_auth || {},
+      apply: (parsed) => {
+        if (parsed === undefined) {
+          delete step.user_auth;
+          return;
+        }
+        step.user_auth = parsed;
+      },
+    };
+  }
   if (target === 'step_expected_json') {
     const step = getSelectedStep();
     if (!step) throw new Error('Select a step first.');
@@ -2299,13 +2442,53 @@ function getJsonDialogConfig(target) {
       },
     };
   }
+  if (target === 'scenario') {
+    return {
+      title: 'Edit scenario JSON',
+      fieldName: 'Scenario',
+      help: 'Advanced edit of the whole scenario file. Save checks the scenario schema, then updates the form.',
+      currentValue: () => getValidatedScenarioPayload(),
+      apply: (parsed) => {
+        const previousIndex = selectedStepIndex;
+        currentScenario = normalizeScenario(parsed);
+        const count = currentScenario.steps.length;
+        if (count === 0) {
+          selectedStepIndex = -1;
+        } else if (previousIndex >= 0 && previousIndex < count) {
+          selectedStepIndex = previousIndex;
+        } else {
+          selectedStepIndex = 0;
+        }
+        lastStepContextVars = {};
+        stepSavedVars = {};
+        lastHydratedCurlKey = '';
+      },
+    };
+  }
   throw new Error('Unknown JSON dialog target');
+}
+
+function clearJsonDialogError() {
+  jsonDialogEditor.setCustomValidity('');
+  if (jsonDialogError) {
+    jsonDialogError.hidden = true;
+    jsonDialogError.textContent = '';
+  }
+}
+
+function showJsonDialogError(message) {
+  if (jsonDialogError) {
+    jsonDialogError.hidden = false;
+    jsonDialogError.textContent = message;
+  }
+  jsonDialogEditor.setCustomValidity('Fix the JSON before saving');
+  jsonDialogEditor.reportValidity();
 }
 
 function closeJsonDialog() {
   currentJsonDialogTarget = null;
   jsonDialog.classList.add('hidden');
-  jsonDialogEditor.setCustomValidity('');
+  clearJsonDialogError();
 }
 
 async function clonePathToWorkspace(path) {
@@ -2403,6 +2586,10 @@ function openJsonDialog(target) {
   }
   currentJsonDialogTarget = target;
   jsonDialogTitle.textContent = config.title;
+  if (jsonDialogHelp) {
+    jsonDialogHelp.textContent = config.help || 'Saved into the open scenario';
+  }
+  clearJsonDialogError();
   jsonDialogEditor.value = stringifyJson(config.currentValue());
   jsonDialog.classList.remove('hidden');
   jsonDialogEditor.focus();
@@ -2412,24 +2599,34 @@ async function saveJsonDialog() {
   if (!currentJsonDialogTarget) {
     return;
   }
+  stepCurlAbort?.abort();
   if (!currentScenario) {
     currentScenario = createEmptyScenario();
   }
 
   const config = getJsonDialogConfig(currentJsonDialogTarget);
+  clearJsonDialogError();
   try {
     const parsed = parseOptionalJson(jsonDialogEditor.value, config.fieldName);
+    if (currentJsonDialogTarget === 'scenario') {
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error('Scenario JSON must be an object');
+      }
+      await validateScenarioDocument(parsed);
+    }
     config.apply(parsed);
     if (currentJsonDialogTarget === 'environments' || currentJsonDialogTarget === 'random_generators') {
       await persistActiveCollectionDocument();
     }
     await saveScenarioIfNamed();
+    const savedScenarioJson = currentJsonDialogTarget === 'scenario';
     closeJsonDialog();
     renderScenarioBuilder();
-    runOutput.textContent = `${config.fieldName} saved to scenario.`;
+    runOutput.textContent = savedScenarioJson
+      ? 'Scenario JSON saved.'
+      : `${config.fieldName} saved to scenario.`;
   } catch (error) {
-    jsonDialogEditor.setCustomValidity(error.message);
-    jsonDialogEditor.reportValidity();
+    showJsonDialogError(formatRequestError(error));
   }
 }
 
@@ -2979,6 +3176,7 @@ async function openScenario(item, options = {}) {
     currentScenario.scenarios = scenario.scenarios;
   }
   lastStepContextVars = {};
+  stepSavedVars = {};
   lastHydratedCurlKey = '';
   selectedStepIndex = currentScenario.steps.length > 0 ? 0 : -1;
   rememberCollectionContext(item.path, currentScenario, Boolean(options?.fromCollection));
@@ -3072,7 +3270,7 @@ async function saveScenario() {
     renderExplorer();
     runOutput.textContent = 'Scenario saved to your workspace.';
   } catch (error) {
-    alert(error.message || String(error));
+    alert(formatRequestError(error));
   }
 }
 
@@ -3098,6 +3296,7 @@ function resetOpenDocuments() {
   currentScenario = null;
   selectedStepIndex = -1;
   lastStepContextVars = {};
+  stepSavedVars = {};
   lastHydratedCurlKey = '';
   loadedWorkspaceEnvKey = '';
 }
@@ -4332,7 +4531,9 @@ function renderSequenceTestResult(result) {
     const extra = step.success
       ? `${step.response_status ?? ''} ${step.latency_ms ?? ''}ms`.trim()
       : (step.error || `status ${step.response_status ?? '?'}`);
-    lines.push(`${mark}  ${step.name || `step_${step.index + 1}`}  ${extra}`);
+    const savedKeys = Object.keys(step.saved || {}).filter((key) => key !== 'worker_id');
+    const savedNote = savedKeys.length ? `  saved ${savedKeys.join(', ')}` : '';
+    lines.push(`${mark}  ${step.name || `step_${step.index + 1}`}  ${extra}${savedNote}`);
   }
   sequenceTestOutput.textContent = lines.join('\n');
 }
@@ -4407,6 +4608,9 @@ async function refreshStepCurl() {
     renderStepCurl('Select a step to see curl.');
     return;
   }
+  stepCurlAbort?.abort();
+  const controller = new AbortController();
+  stepCurlAbort = controller;
   const generation = ++stepCurlGeneration;
   const cacheKey = stepCurlCacheKey();
   const hydratePrior = cacheKey !== lastHydratedCurlKey;
@@ -4415,8 +4619,9 @@ async function refreshStepCurl() {
     const result = await api('/api/preview-step', {
       method: 'POST',
       body: JSON.stringify(stepCurlPayload(hydratePrior)),
+      signal: controller.signal,
     });
-    if (generation !== stepCurlGeneration) {
+    if (generation !== stepCurlGeneration || controller.signal.aborted) {
       return;
     }
     rememberStepContextVars(result);
@@ -4424,12 +4629,13 @@ async function refreshStepCurl() {
     const notes = (result.unresolved || []).length
       ? `\n\n# unresolved: ${(result.unresolved || []).join(', ')}`
       : '';
-    renderStepCurl(`${result.curl || ''}${notes}`, Boolean(result.curl));
+    const savedNote = savedVarComments(stepSavedVars[selectedStepIndex]);
+    renderStepCurl(`${result.curl || ''}${notes}${savedNote}`, Boolean(result.curl));
   } catch (error) {
-    if (generation !== stepCurlGeneration) {
+    if (controller.signal.aborted || error?.name === 'AbortError' || generation !== stepCurlGeneration) {
       return;
     }
-    renderStepCurl(String(error));
+    renderStepCurl(String(error?.message || error));
   }
 }
 
@@ -4514,6 +4720,7 @@ async function testSelectedStep() {
       })),
     });
     rememberStepContextVars(result);
+    stepSavedVars[selectedStepIndex] = savedVarsFromResult(result);
     lastHydratedCurlKey = '';
     renderTestStepResult(result);
     scheduleStepCurlPreview();
@@ -4528,6 +4735,220 @@ function setRunButtonsDisabled(disabled) {
   runInProgress = Boolean(disabled);
   updateRunAvailability();
 }
+
+const USER_AUTH_FLOW_LABELS = {
+  device_code: 'Device code',
+  authorization_code: 'Authorization code',
+};
+
+let userAuthSessionId = '';
+let userAuthTimer = null;
+let userAuthPopup = null;
+let userAuthFinish = null;
+let userAuthAuthorizationUrl = '';
+
+function userAuthDialog() {
+  return document.getElementById('user-auth-dialog');
+}
+
+function clearUserAuthTimer() {
+  if (userAuthTimer) {
+    clearTimeout(userAuthTimer);
+    userAuthTimer = null;
+  }
+}
+
+function setUserAuthStatus(message) {
+  const status = document.getElementById('user-auth-status');
+  if (status) {
+    status.textContent = message || '';
+  }
+}
+
+function showUserAuthPanel(name) {
+  document.getElementById('user-auth-choose')?.classList.toggle('hidden', name !== 'choose');
+  document.getElementById('user-auth-device')?.classList.toggle('hidden', name !== 'device');
+  document.getElementById('user-auth-code')?.classList.toggle('hidden', name !== 'code');
+}
+
+function closeUserAuthDialog() {
+  clearUserAuthTimer();
+  userAuthDialog()?.classList.add('hidden');
+  if (userAuthPopup && !userAuthPopup.closed) {
+    userAuthPopup.close();
+  }
+  userAuthPopup = null;
+  userAuthAuthorizationUrl = '';
+}
+
+function finishUserAuth(result) {
+  const finish = userAuthFinish;
+  userAuthFinish = null;
+  userAuthSessionId = '';
+  closeUserAuthDialog();
+  if (finish) {
+    finish(result);
+  }
+}
+
+function renderUserAuthChoice(pending) {
+  const choose = document.getElementById('user-auth-choose');
+  const help = document.getElementById('user-auth-help');
+  if (help) {
+    const done = (pending.completed_steps || []).filter((step) => step.ok).length;
+    const prefix = done ? `${done} step${done === 1 ? '' : 's'} passed. ` : '';
+    help.textContent = `${prefix}${pending.description || 'Sign in to continue this run.'}`;
+  }
+  if (!choose) {
+    return;
+  }
+  choose.innerHTML = '';
+  const flows = Array.isArray(pending.flows) && pending.flows.length
+    ? pending.flows
+    : ['device_code', 'authorization_code'];
+  flows.forEach((flow) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'primary';
+    button.textContent = USER_AUTH_FLOW_LABELS[flow] || flow;
+    button.addEventListener('click', () => {
+      void beginUserAuthFlow(flow);
+    });
+    choose.appendChild(button);
+  });
+  showUserAuthPanel('choose');
+  setUserAuthStatus(pending.redirect_uri ? `Authorization code returns to ${pending.redirect_uri}` : '');
+  userAuthDialog()?.classList.remove('hidden');
+}
+
+function applyUserAuthPrompt(result) {
+  if (result.flow === 'device_code') {
+    const code = document.getElementById('user-auth-user-code');
+    const link = document.getElementById('user-auth-verify-link');
+    if (code) {
+      code.textContent = result.user_code || '';
+    }
+    const href = result.verification_uri_complete || result.verification_uri || '';
+    if (link) {
+      link.href = href || '#';
+    }
+    showUserAuthPanel('device');
+    setUserAuthStatus(result.message || 'Waiting for you to approve the device code');
+    return;
+  }
+  if (result.flow === 'authorization_code') {
+    userAuthAuthorizationUrl = result.authorization_url || '';
+    const redirect = document.getElementById('user-auth-redirect');
+    if (redirect) {
+      redirect.textContent = result.redirect_uri ? `Redirect URI: ${result.redirect_uri}` : '';
+    }
+    showUserAuthPanel('code');
+    setUserAuthStatus(result.message || 'Waiting for the sign-in window');
+    if (userAuthAuthorizationUrl) {
+      if (userAuthPopup && !userAuthPopup.closed) {
+        userAuthPopup.location = userAuthAuthorizationUrl;
+      } else {
+        userAuthPopup = window.open(userAuthAuthorizationUrl, 'runway-user-auth');
+      }
+    }
+  }
+}
+
+function scheduleUserAuthAdvance(intervalSeconds) {
+  clearUserAuthTimer();
+  const wait = Math.max(Number(intervalSeconds) || 1, 1) * 1000;
+  userAuthTimer = setTimeout(() => {
+    void advanceUserAuth();
+  }, wait);
+}
+
+async function beginUserAuthFlow(flow) {
+  if (!userAuthSessionId) {
+    return;
+  }
+  clearUserAuthTimer();
+  setUserAuthStatus('Contacting the authorization server…');
+  if (flow === 'authorization_code') {
+    userAuthPopup = window.open('about:blank', 'runway-user-auth');
+  }
+  try {
+    const result = await api(`/api/runs/interactive/${encodeURIComponent(userAuthSessionId)}/begin`, {
+      method: 'POST',
+      body: JSON.stringify({flow}),
+    });
+    if (result.status === 'failed') {
+      setUserAuthStatus(result.message || 'Sign-in could not start');
+      if (userAuthPopup && !userAuthPopup.closed) {
+        userAuthPopup.close();
+      }
+      return;
+    }
+    applyUserAuthPrompt(result);
+    scheduleUserAuthAdvance(result.interval_seconds);
+  } catch (error) {
+    setUserAuthStatus(String(error.message || error));
+  }
+}
+
+async function advanceUserAuth() {
+  if (!userAuthSessionId) {
+    return;
+  }
+  try {
+    const result = await api(`/api/runs/interactive/${encodeURIComponent(userAuthSessionId)}/advance`, {
+      method: 'POST',
+      body: '{}',
+    });
+    if (result.status === 'pending') {
+      setUserAuthStatus(result.message || 'Waiting for sign-in');
+      scheduleUserAuthAdvance(result.interval_seconds);
+      return;
+    }
+    if (result.status === 'awaiting_user') {
+      userAuthSessionId = result.session_id || userAuthSessionId;
+      renderUserAuthChoice(result);
+      return;
+    }
+    finishUserAuth(result);
+  } catch (error) {
+    setUserAuthStatus(String(error.message || error));
+  }
+}
+
+function runUserAuthBreakout(pending) {
+  return new Promise((resolve) => {
+    userAuthFinish = resolve;
+    userAuthSessionId = pending.session_id;
+    renderUserAuthChoice(pending);
+  });
+}
+
+async function cancelUserAuth() {
+  const sessionId = userAuthSessionId;
+  clearUserAuthTimer();
+  if (sessionId) {
+    try {
+      await api(`/api/runs/interactive/${encodeURIComponent(sessionId)}/cancel`, {
+        method: 'POST',
+        body: '{}',
+      });
+    } catch {
+      // The session may already be gone. Closing the dialog is enough.
+    }
+  }
+  finishUserAuth({status: 'cancelled'});
+}
+
+window.addEventListener('message', (event) => {
+  if (event.origin !== window.location.origin) {
+    return;
+  }
+  if (!event.data || event.data.type !== 'runway-user-auth' || !userAuthSessionId) {
+    return;
+  }
+  clearUserAuthTimer();
+  void advanceUserAuth();
+});
 
 async function startRun() {
   const runFile = activeCollectionPath || selectedScenarioName || scenarioNameInput.value.trim();
@@ -4586,13 +5007,24 @@ async function startRun() {
     regression: true,
   };
   let runFailed = false;
+  let runCancelled = false;
   try {
-    const result = await api('/api/runs', {method: 'POST', body: JSON.stringify(payload)});
-    const logText = stripAnsi(result.stdout || '').trim();
-    runOutput.textContent = logText || 'Run completed.';
-    renderLastRunResults(result.summary);
-    if (result.status === 'completed_with_errors') {
-      runFailed = true;
+    let result = await api('/api/runs', {method: 'POST', body: JSON.stringify(payload)});
+    if (result.status === 'awaiting_user') {
+      runProgressLabel.textContent = 'Waiting for sign-in';
+      runOutput.textContent = 'Paused for sign-in. Complete it in the dialog.';
+      result = await runUserAuthBreakout(result);
+    }
+    if (result?.status === 'cancelled') {
+      runCancelled = true;
+      runOutput.textContent = 'Run cancelled.';
+    } else {
+      const logText = stripAnsi(result.stdout || '').trim();
+      runOutput.textContent = logText || 'Run completed.';
+      renderLastRunResults(result.summary);
+      if (result.status === 'completed_with_errors') {
+        runFailed = true;
+      }
     }
   } catch (error) {
     runFailed = true;
@@ -4612,7 +5044,9 @@ async function startRun() {
     runSpinner.classList.add('hidden');
     setRunButtonsDisabled(false);
 
-    if (runFailed) {
+    if (runCancelled) {
+      runProgressLabel.textContent = 'Cancelled';
+    } else if (runFailed) {
       runProgressBar.style.transition = 'none';
       runProgressBar.classList.add('run-progress-bar--error');
       runProgressLabel.textContent = 'Failed';
@@ -4853,6 +5287,33 @@ if (importCollectionFileInput) {
 if (regressionRunButton) {
   regressionRunButton.addEventListener('click', () => startRun());
 }
+document.getElementById('user-auth-cancel')?.addEventListener('click', () => {
+  void cancelUserAuth();
+});
+document.getElementById('user-auth-copy')?.addEventListener('click', async () => {
+  const code = document.getElementById('user-auth-user-code')?.textContent || '';
+  if (!code) {
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(code.trim());
+    setUserAuthStatus('Code copied.');
+  } catch {
+    setUserAuthStatus(code.trim());
+  }
+});
+document.getElementById('user-auth-reopen')?.addEventListener('click', () => {
+  if (!userAuthAuthorizationUrl) {
+    return;
+  }
+  userAuthPopup = window.open(userAuthAuthorizationUrl, 'runway-user-auth');
+});
+document.getElementById('user-auth-dialog')?.addEventListener('click', (event) => {
+  if (event.target?.dataset?.close === 'true') {
+    void cancelUserAuth();
+  }
+});
+
 document.getElementById('add-step').addEventListener('click', addStep);
 stepMoveUpButton.addEventListener('click', () => moveStep(selectedStepIndex, selectedStepIndex - 1));
 stepMoveDownButton.addEventListener('click', () => moveStep(selectedStepIndex, selectedStepIndex + 1));
@@ -4910,6 +5371,7 @@ scenarioEnvironmentSelect.addEventListener('change', () => {
   }
   lastHydratedCurlKey = '';
   lastStepContextVars = {};
+  stepSavedVars = {};
   lastRequiredEnvNames = '';
   loadedWorkspaceEnvKey = '';
   void loadWorkspaceEnvValues().finally(() => {
@@ -4920,10 +5382,13 @@ scenarioEnvironmentSelect.addEventListener('change', () => {
 
 editRandomGeneratorsJsonButton.addEventListener('click', () => openJsonDialog('random_generators'));
 editEnvironmentsJsonButton.addEventListener('click', () => openJsonDialog('environments'));
+editScenarioJsonButton?.addEventListener('click', () => openJsonDialog('scenario'));
+jsonDialogEditor?.addEventListener('input', () => clearJsonDialogError());
 editStepHeadersJsonButton.addEventListener('click', () => openJsonDialog('step_headers'));
 editStepJsonButton.addEventListener('click', () => openJsonDialog('step_json'));
 editStepSaveJsonButton.addEventListener('click', () => openJsonDialog('step_save'));
 editStepExpectedJsonButton.addEventListener('click', () => openJsonDialog('step_expected_json'));
+editStepUserAuthJsonButton?.addEventListener('click', () => openJsonDialog('step_user_auth'));
 jsonDialogCancelButton.addEventListener('click', closeJsonDialog);
 jsonDialogCancelTopButton.addEventListener('click', closeJsonDialog);
 jsonDialogSaveButton.addEventListener('click', saveJsonDialog);
@@ -4943,6 +5408,25 @@ bindStepField(stepNameInput, (step, element) => {
 });
 bindStepField(stepMethodInput, (step, element) => {
   step.method = element.value;
+  if (element.value === 'USER_AUTH' && !step.user_auth) {
+    step.user_auth = {
+      flows: ['device_code', 'authorization_code'],
+      client_id: '{{ env.client_id }}',
+      client_secret: '{{ env.client_secret }}',
+      scope: 'openid profile offline_access',
+      authorization_endpoint: '{{ env.authorization_endpoint }}',
+      device_authorization_endpoint: '{{ env.device_authorization_endpoint }}',
+      token_endpoint: '{{ env.token_endpoint }}',
+      redirect_uri: '{{ env.redirect_uri }}',
+    };
+    if (!step.save) {
+      step.save = {
+        user_access_token: '{{ json.access_token }}',
+        user_refresh_token: '{{ json.refresh_token }}',
+        user_id_token: '{{ json.id_token }}',
+      };
+    }
+  }
 });
 bindStepField(stepPathInput, (step, element) => {
   step.path = element.value.trim();

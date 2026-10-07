@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
+import requests
+
 from webapp.app import mask_sensitive_text
 
 
@@ -134,3 +139,126 @@ def test_mask_sensitive_text():
     assert mask_sensitive_text("authorization = bearer abc.def") == "authorization = bearer ***"
     assert mask_sensitive_text("plain text") == "plain text"
     assert mask_sensitive_text("") == ""
+
+
+def test_test_step_reports_saved_discovery_fields(client, monkeypatch):
+    class _Response:
+        def __init__(self, payload, url):
+            self.status_code = 200
+            self.url = url
+            self.headers = {"Content-Type": "application/json"}
+            self.reason = "OK"
+            self._payload = payload
+            self.text = json.dumps(payload)
+
+        def json(self):
+            return self._payload
+
+    def fake_request(self, method, url, **kwargs):  # noqa: ARG001
+        return _Response(
+            {
+                "issuer": "https://idp.example.org",
+                "authorization_endpoint": "https://idp.example.org/authorize",
+                "token_endpoint": "https://idp.example.org/token",
+                "registration_endpoint": "https://idp.example.org/register",
+                "device_authorization_endpoint": "https://idp.example.org/device",
+            },
+            url,
+        )
+
+    monkeypatch.setattr("requests.Session.request", fake_request)
+    response = client.post(
+        "/api/test-step",
+        json={
+            "scenario": {
+                "steps": [
+                    {
+                        "name": "discover_openid",
+                        "method": "GET",
+                        "path": "https://idp.example.org/.well-known/openid-configuration",
+                        "expected_status": 200,
+                        "save": {
+                            "issuer": "{{ json.issuer }}",
+                            "registration_endpoint": "json.registration_endpoint",
+                            "device_authorization_endpoint": "json.device_authorization_endpoint",
+                        },
+                    }
+                ]
+            },
+            "step_index": 0,
+        },
+    )
+    assert response.status_code == 200
+    saved = response.json()["saved"]
+    assert saved["issuer"] == "https://idp.example.org"
+    assert saved["registration_endpoint"] == "https://idp.example.org/register"
+    assert saved["device_authorization_endpoint"] == "https://idp.example.org/device"
+    assert "worker_id" not in saved
+
+
+def test_failed_discovery_does_not_save_null_json_vars(client, monkeypatch):
+    def fake_request(self, method, url, **kwargs):  # noqa: ARG001
+        raise requests.ConnectionError("connection refused")
+
+    monkeypatch.setattr("requests.Session.request", fake_request)
+    response = client.post(
+        "/api/test-step",
+        json={
+            "scenario": {
+                "steps": [
+                    {
+                        "name": "discover_openid",
+                        "method": "GET",
+                        "path": "https://idp.example.org/.well-known/openid-configuration",
+                        "expected_status": 200,
+                        "save": {"issuer": "json.issuer", "token_endpoint": "json.token_endpoint"},
+                    }
+                ]
+            },
+            "step_index": 0,
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["success"] is False
+    assert body["saved"] == {}
+    assert "issuer" not in body["context"]["vars"]
+    assert "connection refused" in str(body["response_body"])
+
+
+def test_validate_scenario_endpoint_accepts_token_exchange(client):
+    document = json.loads(
+        (Path(__file__).resolve().parents[1] / "examples" / "token-exchange" / "token_exchange.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    response = client.post("/api/scenarios/validate", json=document)
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+    rejected = client.post("/api/scenarios/validate", json={"steps": [{"method": "NOPE"}]})
+    assert rejected.status_code == 400
+    assert any("method" in item for item in rejected.json()["detail"]["errors"])
+
+
+def test_workspace_save_rejects_a_scenario_that_breaks_the_schema(client):
+    created = client.post(
+        "/api/explorer/create",
+        json={"kind": "collection", "name": "Schema check", "target": "workspace"},
+    )
+    assert created.status_code == 200
+    scenario = client.post(
+        "/api/explorer/create",
+        json={"kind": "scenario", "name": "draft", "target": created.json()["path"]},
+    )
+    assert scenario.status_code == 200
+    path = scenario.json()["path"]
+    rejected = client.post(
+        f"/api/workspace/file?path={path}",
+        json={"name": "draft", "steps": [{"method": "NOPE", "path": "/"}]},
+    )
+    assert rejected.status_code == 400
+    assert any("method" in item for item in rejected.json()["detail"]["errors"])
+    kept = client.get(f"/api/workspace/file?path={path}")
+    assert kept.status_code == 200
+    assert "NOPE" not in json.dumps(kept.json())
+

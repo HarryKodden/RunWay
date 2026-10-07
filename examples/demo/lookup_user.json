@@ -16,10 +16,10 @@
       "stop_on_failure": true,
       "expected_status": 200,
       "save": {
-        "looked_up_user_id": "json.id",
-        "user_name": "json.name",
-        "user_email": "json.email",
-        "username": "json.username"
+        "looked_up_user_id": "{{ json.id }}",
+        "user_name": "{{ json.name }}",
+        "user_email": "{{ json.email }}",
+        "username": "{{ json.username }}"
       }
     },
     {

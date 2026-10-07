@@ -221,6 +221,7 @@
                         <option>DELETE</option>
                         <option>PATCH</option>
                         <option>HEAD</option>
+                        <option value="USER_AUTH">USER_AUTH</option>
                       </select>
                     </label>
                     <label class="step-url-field">URL or path
@@ -250,7 +251,12 @@
                       <span class="json-field-title">Expected JSON</span>
                       <span class="json-field-flag" hidden>Set</span>
                     </button>
+                    <button id="edit-step-user-auth-json" type="button" class="json-field-btn hidden" data-label="Sign-in settings" aria-label="Edit Sign-in settings">
+                      <span class="json-field-title">Sign-in settings</span>
+                      <span class="json-field-flag" hidden>Set</span>
+                    </button>
                   </div>
+                  <p id="step-user-auth-note" class="muted hidden">Run Tests pauses on this step so someone can sign in with a device code or the authorization code flow. Authorization code returns to this app at /scenario-auth/callback.</p>
                   <label class="toggle-row">
                     <input id="step-follow-redirects" type="checkbox" />
                     <span>Follow redirects</span>
@@ -266,10 +272,16 @@
                 </div>
               </div>
             </div>
-            <details class="json-preview-wrap">
-              <summary>Scenario JSON Preview</summary>
-              <textarea id="scenario-editor" spellcheck="false" readonly></textarea>
-            </details>
+            <div class="json-preview-wrap">
+              <div class="json-preview-bar">
+                <span class="muted">Advanced</span>
+                <button id="edit-scenario-json" type="button" class="ghost" title="Edit the scenario file directly. Save checks the scenario schema.">Edit scenario JSON</button>
+              </div>
+              <details>
+                <summary>Scenario JSON Preview</summary>
+                <textarea id="scenario-editor" spellcheck="false" readonly></textarea>
+              </details>
+            </div>
           </section>
 
           <section class="panel card">
@@ -289,6 +301,38 @@
     </main>
 
     <div id="explorer-menu" class="menu explorer-menu hidden" role="menu"></div>
+
+    <div id="user-auth-dialog" class="json-dialog hidden" role="dialog" aria-modal="true" aria-labelledby="user-auth-title">
+      <div class="json-dialog-backdrop" data-close="true"></div>
+      <div class="json-dialog-card user-auth-card">
+        <header class="modal-head section-head">
+          <div>
+            <h2 id="user-auth-title">Sign in to continue</h2>
+            <p id="user-auth-help" class="muted"></p>
+          </div>
+        </header>
+        <div id="user-auth-choose" class="user-auth-actions"></div>
+        <div id="user-auth-device" class="hidden">
+          <p>Open the verification page and enter this code:</p>
+          <p id="user-auth-user-code" class="user-auth-code"></p>
+          <div class="user-auth-actions">
+            <a id="user-auth-verify-link" class="primary user-auth-link" href="" target="_blank" rel="noopener">Open verification page</a>
+            <button id="user-auth-copy" type="button" class="ghost">Copy code</button>
+          </div>
+        </div>
+        <div id="user-auth-code" class="hidden">
+          <p>Finish sign-in in the window that opened. This run continues when the IdP redirects back here.</p>
+          <p id="user-auth-redirect" class="muted"></p>
+          <div class="user-auth-actions">
+            <button id="user-auth-reopen" type="button" class="ghost">Open sign-in again</button>
+          </div>
+        </div>
+        <p id="user-auth-status" class="muted"></p>
+        <div class="user-auth-actions">
+          <button id="user-auth-cancel" type="button" class="ghost">Cancel run</button>
+        </div>
+      </div>
+    </div>
 
     <div id="about-dialog" class="json-dialog hidden" role="dialog" aria-modal="true" aria-labelledby="about-dialog-title">
       <div class="json-dialog-backdrop" data-close="true"></div>
@@ -384,11 +428,12 @@
         <header class="modal-head section-head">
           <div>
             <h2 id="json-dialog-title">Edit JSON</h2>
-            <p class="muted">Saved into the open scenario</p>
+            <p id="json-dialog-help" class="muted">Saved into the open scenario</p>
           </div>
           <button id="json-dialog-cancel-top" type="button" class="icon-btn">Close</button>
         </header>
         <textarea id="json-dialog-editor" spellcheck="false"></textarea>
+        <p id="json-dialog-error" class="json-dialog-error" hidden></p>
         <div class="actions row-end">
           <button id="json-dialog-cancel" type="button" class="ghost">Cancel</button>
           <button id="json-dialog-save" type="button" class="primary">Save to Scenario</button>

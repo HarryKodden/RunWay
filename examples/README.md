@@ -34,3 +34,14 @@ printf '%s\n' '{"user_id":"1"}' > /tmp/demo-env.json
 API hosts must be an IP or FQDN, not localhost.
 
 The `oauth2-server/` fixtures can stay on disk for local work; they are listed in `.gitignore` and are not part of the published repository.
+
+## Token exchange
+
+`token-exchange/` is the RunWay version of the token-exchange demo: dynamic client registration, a user sign-in, RFC 8693 token exchange, then refresh, introspection, and userinfo.
+
+| File | Purpose |
+|------|---------|
+| `token-exchange/suite.json` | IdP environment: `server`, `api_key`, `redirect_uri` |
+| `token-exchange/token_exchange.json` | The chained OAuth steps, including a `USER_AUTH` pause |
+
+Fill the environment, then Run Tests. `server` is the issuer URL. `redirect_uri` is this RunWay app's origin plus `/scenario-auth/callback` (the field placeholder shows it). The run pauses at **user_authentication** and asks for a device code or an authorization code. The CLI stops on that step.

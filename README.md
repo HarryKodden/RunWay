@@ -16,6 +16,7 @@ The CLI entrypoint is `bin/run.sh`. RunWay is a regression tester, not a load te
 - Export collections as Bruno collection JSON
 - Block-based scenario editor with per-step forms, drag-and-drop reordering, and step/sequence dry-runs
 - Live run UX with spinner and a pass/fail list
+- Browser sign-in break-out: a `USER_AUTH` step pauses the run for an OIDC device code or authorization code flow
 
 ## Repository Layout
 - `bin/run.sh` - runner (use `--regression` for the UI/CLI default)
@@ -317,6 +318,8 @@ If a referenced environment variable has no value, the Run panel lists it and **
 
 The `server` key in an environment overrides `base_url` for URL construction. All other keys are available as template variables. After a host is chosen, `server` and `base_url` are both set so either name works in templates.
 
+Set `"insecure_tls": true` on an environment to accept self-signed HTTPS certificates for that run. `RUNWAY_INSECURE_TLS=true` does the same for every run unless the environment sets `insecure_tls` to false.
+
 ### Using a named environment from the CLI
 
 Pass `--scenario-environment` to the shell runner:
@@ -342,6 +345,8 @@ When you import an Insomnia YAML or JSON export that contains sub-environments, 
 ## Scenario Patterns
 
 Use these patterns to model realistic API workflows.
+
+The web UI can also edit a scenario as JSON. Open a scenario and choose **Edit scenario JSON**. Saving checks the file against the scenario schema and lists each field that does not match.
 
 1. Chain two requests by saving response fields from step 1 and injecting into step 2.
 2. Save response headers and reuse them in later calls (for auth/session style flows).
@@ -371,8 +376,8 @@ Use these patterns to model realistic API workflows.
       },
       "expected_status": [200, 201, 204],
       "save": {
-        "saved_uid": "json.uid",
-        "saved_email": "json.email"
+        "saved_uid": "{{ json.uid }}",
+        "saved_email": "{{ json.email }}"
       },
       "save_response_as": "mock_response"
     },
@@ -402,7 +407,7 @@ Use these patterns to model realistic API workflows.
       "json": { "username": "demo", "password": "secret" },
       "expected_status": 200,
       "save": {
-        "auth_header": "headers.Authorization"
+        "auth_header": "{{ headers.Authorization }}"
       }
     },
     {
@@ -457,8 +462,8 @@ Use these patterns to model realistic API workflows.
 
 ### Save/placeholder reference cheat sheet
 
-- Save JSON field: `"my_var": "json.data.id"`
-- Save header: `"token": "headers.Authorization"`
+- Save JSON field: `"my_var": "{{ json.data.id }}"`
+- Save header: `"token": "{{ headers.Authorization }}"`
 - Save entire response: `"save_response_as": "response_obj"`
 - Reuse saved var: `{{ vars.my_var }}`
 - Reuse nested object field: `{{ vars.response_obj.data.id }}`
@@ -466,6 +471,18 @@ Use these patterns to model realistic API workflows.
 - Timestamp placeholder: `{{ meta.now }}`
 - Unix epoch placeholder: `{{ meta.unix }}`
 - Selected environment name: `{{ meta.environment }}`
+
+## Browser sign-in
+
+A step with `"method": "USER_AUTH"` pauses **Run Tests** so a person can sign in. The step's `user_auth.flows` list can include `device_code`, `authorization_code`, or both. The run dialog offers each one.
+
+Device code shows the user code and a verification link, then polls the token endpoint until the IdP returns tokens.
+
+Authorization code opens the IdP. Set `redirect_uri` to this RunWay origin plus `/scenario-auth/callback`, and register that URI on the client. RunWay exchanges the authorization code with PKCE and continues the scenario.
+
+The step's `save` map copies the token response into `vars` (`{{ json.access_token }}`, `{{ json.refresh_token }}`, and so on). Later steps use `{{ vars.user_access_token }}`.
+
+The CLI cannot complete this step. Use the web UI. The published example is `examples/token-exchange/`.
 
 ## Output
 The web UI keeps only the last run in the page: a pass/fail list. It does not write `results/` folders or markdown reports.

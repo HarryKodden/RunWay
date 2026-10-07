@@ -25,7 +25,7 @@
       "path": "/health",
       "expected_status": 200,
       "save": {
-        "db_status": "json.components.database"
+        "db_status": "{{ json.components.database }}"
       }
     },
     {
@@ -34,7 +34,7 @@
       "path": "/config",
       "expected_status": 200,
       "save": {
-        "socket_url": "json.socket_url"
+        "socket_url": "{{ json.socket_url }}"
       }
     },
     {

@@ -21,6 +21,7 @@ from typing import Any
 from urllib.parse import quote, urlparse
 
 import requests
+import urllib3
 from tools.oauth_helpers import (
     absolute_url,
     is_same_origin_url,
@@ -49,6 +50,42 @@ FORBIDDEN_API_HOSTS = frozenset({
     "ip6-loopback",
 })
 ROUTABLE_HOST_HELP = "API hosts must be an IP or FQDN, not localhost or host.docker.internal"
+
+
+def env_flag(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return bool(value)
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return None
+
+
+def tls_verify_enabled(environment: dict[str, Any] | None) -> bool:
+    """Certificate checks stay on unless the environment or process opts out.
+
+    An environment ``insecure_tls`` value wins over ``RUNWAY_INSECURE_TLS``.
+    """
+    if isinstance(environment, dict) and "insecure_tls" in environment:
+        flag = env_flag(environment.get("insecure_tls"))
+        if flag is not None:
+            return not flag
+    return not bool(env_flag(os.environ.get("RUNWAY_INSECURE_TLS")))
+
+
+def configure_http_session(session: requests.Session, environment: dict[str, Any] | None) -> None:
+    verify = tls_verify_enabled(environment)
+    session.verify = verify
+    if not verify:
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 def parse_target_hostname(value: str) -> str:
@@ -319,7 +356,7 @@ def resolve_environment_values(scenario: dict[str, Any], selected_environment: s
 
 def _environment_ref_path(token: str) -> str | None:
     name, _default = parse_placeholder_token(token)
-    if name.startswith(("vars.", "random.", "meta.")):
+    if name.startswith(("vars.", "random.", "meta.", "json.", "headers.", "url_query.", "location_query.")):
         return None
     if name.startswith("env."):
         return name[4:]
@@ -722,6 +759,16 @@ def run_prepare(action: dict[str, Any], context: dict[str, Any], random_generato
     raise ValueError(f"Unknown prepare action: {kind}")
 
 
+def save_source_name(source: str) -> str:
+    """Accept `json.field` and `{{ json.field }}` as the same response reference."""
+    text = str(source).strip()
+    if text.startswith("{{") and text.endswith("}}"):
+        inner = text[2:-2].strip()
+        if inner:
+            return inner
+    return text
+
+
 def apply_save(
     step: dict[str, Any],
     response_json: Any,
@@ -733,8 +780,12 @@ def apply_save(
     context.setdefault("vars", {})
     save_map = step.get("save", {}) or {}
     for var_name, source in save_map.items():
-        source = str(source)
+        source = save_source_name(source)
         if source.startswith("json."):
+            # A missing document must not wipe the variable with null. A present
+            # document still records a missing field as null.
+            if response_json is None:
+                continue
             context["vars"][var_name] = path_get(response_json, source[5:], None)
             continue
         if source.startswith("headers.") and response is not None:
@@ -916,9 +967,19 @@ def prepare_output_keys(action: dict[str, Any]) -> list[str]:
     return []
 
 
+USER_AUTH_CLI_MESSAGE = (
+    "This step pauses for browser sign-in (authorization code or device code). "
+    "Run the scenario from the RunWay UI."
+)
+
+
+def is_user_auth_step(step: dict[str, Any] | None) -> bool:
+    return isinstance(step, dict) and str(step.get("method", "")).upper() == "USER_AUTH"
+
+
 def missing_var_tokens(step: dict[str, Any], context: dict[str, Any]) -> list[str]:
     tokens: list[str] = []
-    for key in ("path", "url", "headers", "json", "data", "auth", "command", "exec", "cwd", "prepare"):
+    for key in ("path", "url", "headers", "json", "data", "auth", "command", "exec", "cwd", "prepare", "user_auth"):
         tokens.extend(collect_placeholders(step.get(key)))
     missing: list[str] = []
     vars_map = context.get("vars") if isinstance(context.get("vars"), dict) else {}
@@ -969,8 +1030,10 @@ def format_curl_command(
     payload_json: Any = None,
     payload_data: Any = None,
     timeout: float | None = None,
+    insecure: bool = False,
 ) -> str:
-    lines = [f"curl -sS -X {method} {shlex.quote(url)}"]
+    flags = "-k " if insecure else ""
+    lines = [f"curl -sS {flags}-X {method} {shlex.quote(url)}"]
     header_items = headers or {}
     has_content_type = any(str(key).lower() == "content-type" for key in header_items)
     for key, value in header_items.items():
@@ -994,6 +1057,7 @@ def run_http_step(
     context: dict[str, Any],
     random_generators: dict[str, Any],
 ) -> tuple[bool, bool, float, Any, requests.Response | None, str | None, str]:
+    configure_http_session(session, context.get("env") if isinstance(context.get("env"), dict) else None)
     request = build_http_request(step, base_url, context, random_generators)
     method = request["method"]
     url = request["url"]
@@ -1177,6 +1241,8 @@ def run_step(
     random_generators: dict[str, Any],
 ) -> tuple[bool, bool, float, Any, requests.Response | None]:
     method = str(step.get("method", "GET")).upper()
+    if method == "USER_AUTH":
+        return False, False, 0.0, USER_AUTH_CLI_MESSAGE, None
 
     def _normalize_prepare(raw: Any) -> list[dict[str, Any]]:
         if raw is None:
@@ -1221,7 +1287,7 @@ def run_step(
             session, step, base_url, context, random_generators
         )
 
-    if response is not None or final_url or body_text:
+    if response is not None:
         apply_save(step, response_json, response, context, final_url=final_url, body_text=body_text)
 
     # Optional: on use_dpop_nonce, mint new proof and retry once
@@ -1316,8 +1382,28 @@ def preview_step_request(
         seconds = render_template(step.get("seconds", 1), context, random_generators)
         curl = f"sleep {seconds}"
         request["url"] = curl
+    elif method == "USER_AUTH":
+        auth = render_template(step.get("user_auth") or {}, context, random_generators)
+        if not isinstance(auth, dict):
+            auth = {}
+        flows = auth.get("flows") or ["device_code", "authorization_code"]
+        if isinstance(flows, str):
+            flows = [flows]
+        curl = "\n".join(
+            [
+                "# USER_AUTH — pauses the run for browser sign-in",
+                f"# flows: {', '.join(str(item) for item in flows)}",
+                f"# authorization_endpoint: {auth.get('authorization_endpoint') or ''}",
+                f"# device_authorization_endpoint: {auth.get('device_authorization_endpoint') or ''}",
+                f"# token_endpoint: {auth.get('token_endpoint') or ''}",
+                f"# redirect_uri: {auth.get('redirect_uri') or ''}",
+                f"# client_id: {auth.get('client_id') or ''}",
+            ]
+        )
+        request["url"] = curl
     else:
         request = build_http_request(step, base_url, context, random_generators)
+        insecure = not tls_verify_enabled(context.get("env") if isinstance(context.get("env"), dict) else None)
         curl = format_curl_command(
             method=request["method"],
             url=request["url"],
@@ -1325,6 +1411,7 @@ def preview_step_request(
             payload_json=request["json"],
             payload_data=request["data"],
             timeout=float(timeout) if timeout not in (None, "") else None,
+            insecure=insecure,
         )
 
     return {

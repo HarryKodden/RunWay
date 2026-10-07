@@ -1,0 +1,240 @@
+{
+  "name": "token_exchange",
+  "description": "Register a backend and a frontend client, pause for a user sign-in, then exchange the refresh token and call introspection and userinfo with the backend token.",
+  "fail_fast": true,
+  "selected_environment": "idp",
+  "steps": [
+    {
+      "name": "discover_openid",
+      "description": "Read the authorization server metadata, including the endpoints later steps call.",
+      "method": "GET",
+      "path": "{{ env.server }}/.well-known/openid-configuration",
+      "headers": {
+        "Accept": "application/json"
+      },
+      "stop_on_failure": true,
+      "expected_status": 200,
+      "save": {
+        "issuer": "{{ json.issuer }}",
+        "authorization_endpoint": "{{ json.authorization_endpoint }}",
+        "token_endpoint": "{{ json.token_endpoint }}",
+        "userinfo_endpoint": "{{ json.userinfo_endpoint }}",
+        "introspection_endpoint": "{{ json.introspection_endpoint }}",
+        "registration_endpoint": "{{ json.registration_endpoint }}",
+        "device_authorization_endpoint": "{{ json.device_authorization_endpoint }}"
+      }
+    },
+    {
+      "name": "register_backend_client",
+      "description": "Register the backend client that will perform the token exchange and refresh.",
+      "method": "POST",
+      "path": "{{ vars.registration_endpoint }}",
+      "headers": {
+        "Accept": "application/json",
+        "X-API-KEY": "{{ env.api_key }}"
+      },
+      "json": {
+        "redirect_uris": [],
+        "grant_types": [
+          "client_credentials",
+          "refresh_token",
+          "urn:ietf:params:oauth:grant-type:token-exchange"
+        ],
+        "scope": "openid profile offline_access"
+      },
+      "stop_on_failure": true,
+      "expected_status": [
+        200,
+        201
+      ],
+      "save": {
+        "backend_client_id": "{{ json.client_id }}",
+        "backend_client_secret": "{{ json.client_secret }}"
+      }
+    },
+    {
+      "name": "register_frontend_client",
+      "description": "Register the frontend client. Its audience is the backend client, and it may use either a device code or an authorization code.",
+      "method": "POST",
+      "path": "{{ vars.registration_endpoint }}",
+      "headers": {
+        "Accept": "application/json",
+        "X-API-KEY": "{{ env.api_key }}"
+      },
+      "json": {
+        "grant_types": [
+          "client_credentials",
+          "refresh_token",
+          "authorization_code",
+          "urn:ietf:params:oauth:grant-type:device_code"
+        ],
+        "redirect_uris": [
+          "{{ env.redirect_uri }}"
+        ],
+        "response_types": [
+          "code"
+        ],
+        "scope": "openid profile offline_access",
+        "audience": [
+          "{{ vars.backend_client_id }}"
+        ]
+      },
+      "stop_on_failure": true,
+      "expected_status": [
+        200,
+        201
+      ],
+      "save": {
+        "frontend_client_id": "{{ json.client_id }}",
+        "frontend_client_secret": "{{ json.client_secret }}"
+      }
+    },
+    {
+      "name": "user_authentication",
+      "description": "Pause the run so you can sign in. Device code shows a user code and verification link. Authorization code opens the IdP and returns to redirect_uri.",
+      "method": "USER_AUTH",
+      "stop_on_failure": true,
+      "user_auth": {
+        "flows": [
+          "device_code",
+          "authorization_code"
+        ],
+        "client_id": "{{ vars.frontend_client_id }}",
+        "client_secret": "{{ vars.frontend_client_secret }}",
+        "scope": "openid profile offline_access",
+        "audience": "{{ vars.backend_client_id }}",
+        "issuer": "{{ vars.issuer }}",
+        "authorization_endpoint": "{{ vars.authorization_endpoint }}",
+        "device_authorization_endpoint": "{{ vars.device_authorization_endpoint }}",
+        "token_endpoint": "{{ vars.token_endpoint }}",
+        "redirect_uri": "{{ env.redirect_uri }}"
+      },
+      "save": {
+        "user_access_token": "{{ json.access_token }}",
+        "user_refresh_token": "{{ json.refresh_token }}",
+        "user_id_token": "{{ json.id_token }}"
+      }
+    },
+    {
+      "name": "frontend_userinfo",
+      "description": "Call userinfo with the access token from the sign-in.",
+      "method": "GET",
+      "path": "{{ vars.userinfo_endpoint }}",
+      "headers": {
+        "Authorization": "Bearer {{ vars.user_access_token }}",
+        "Accept": "application/json"
+      },
+      "stop_on_failure": true,
+      "expected_status": 200,
+      "save": {
+        "user_subject": "{{ json.sub }}"
+      }
+    },
+    {
+      "name": "refresh_token_handover",
+      "description": "Hand the frontend refresh token to the backend client. This is the manual handover from the token-exchange demo.",
+      "method": "PREPARE",
+      "prepare": {
+        "action": "set",
+        "vars": {
+          "handover_refresh_token": "{{ vars.user_refresh_token }}"
+        }
+      },
+      "stop_on_failure": true
+    },
+    {
+      "name": "token_exchange",
+      "description": "Exchange the handed-over refresh token for a refresh token minted to the backend client.",
+      "method": "POST",
+      "path": "{{ vars.token_endpoint }}",
+      "auth": {
+        "type": "basic",
+        "username": "{{ vars.backend_client_id }}",
+        "password": "{{ vars.backend_client_secret }}"
+      },
+      "headers": {
+        "Accept": "application/json",
+        "Content-Type": "application/x-www-form-urlencoded"
+      },
+      "data": {
+        "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+        "subject_token": "{{ vars.handover_refresh_token }}",
+        "subject_token_type": "urn:ietf:params:oauth:token-type:refresh_token",
+        "requested_token_type": "urn:ietf:params:oauth:token-type:refresh_token",
+        "scope": "openid offline_access profile"
+      },
+      "stop_on_failure": true,
+      "expected_status": 200,
+      "save": {
+        "exchanged_access_token": "{{ json.access_token }}",
+        "exchanged_refresh_token": "{{ json.refresh_token }}"
+      }
+    },
+    {
+      "name": "refresh_backend_token",
+      "description": "Use the exchanged refresh token to mint a backend access token.",
+      "method": "POST",
+      "path": "{{ vars.token_endpoint }}",
+      "auth": {
+        "type": "basic",
+        "username": "{{ vars.backend_client_id }}",
+        "password": "{{ vars.backend_client_secret }}"
+      },
+      "headers": {
+        "Accept": "application/json",
+        "Content-Type": "application/x-www-form-urlencoded"
+      },
+      "data": {
+        "grant_type": "refresh_token",
+        "refresh_token": "{{ vars.exchanged_refresh_token }}",
+        "client_id": "{{ vars.backend_client_id }}",
+        "scope": "openid profile"
+      },
+      "stop_on_failure": true,
+      "expected_status": 200,
+      "save": {
+        "backend_access_token": "{{ json.access_token }}",
+        "backend_refresh_token": "{{ json.refresh_token }}"
+      }
+    },
+    {
+      "name": "introspect_backend_token",
+      "description": "Introspect the backend access token.",
+      "method": "POST",
+      "path": "{{ vars.introspection_endpoint }}",
+      "auth": {
+        "type": "basic",
+        "username": "{{ vars.backend_client_id }}",
+        "password": "{{ vars.backend_client_secret }}"
+      },
+      "headers": {
+        "Accept": "application/json",
+        "Content-Type": "application/x-www-form-urlencoded"
+      },
+      "data": {
+        "token": "{{ vars.backend_access_token }}",
+        "token_type_hint": "access_token"
+      },
+      "stop_on_failure": true,
+      "expected_status": 200,
+      "expected_json_contains": {
+        "active": true
+      }
+    },
+    {
+      "name": "backend_userinfo",
+      "description": "Call userinfo with the backend access token.",
+      "method": "GET",
+      "path": "{{ vars.userinfo_endpoint }}",
+      "headers": {
+        "Authorization": "Bearer {{ vars.backend_access_token }}",
+        "Accept": "application/json"
+      },
+      "stop_on_failure": true,
+      "expected_status": 200,
+      "expected_json_contains": {
+        "sub": "{{ vars.user_subject }}"
+      }
+    }
+  ]
+}
