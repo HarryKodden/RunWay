@@ -89,7 +89,7 @@ jobs:
 
       - name: Smoke test
         run: |
-          docker run -d --name runway -p 8080:8080 runway:ci
+          docker run -d --name runway -p 8080:8080 -e RUNWAY_DEV_MODE=true runway:ci
           for i in $(seq 1 30); do
             if curl -sf http://127.0.0.1:8080/api/health; then
               echo
