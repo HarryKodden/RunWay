@@ -24,7 +24,7 @@ from tools.scenario_runner import (
     exported_context_vars,
     finalize_environment_values,
     is_collection,
-    is_forbidden_api_target,
+    ensure_safe_request_url,
     is_user_auth_step,
     load_collection_members,
     missing_environment_dependencies,
@@ -34,6 +34,7 @@ from tools.scenario_runner import (
     resolve_base_url,
     resolve_environment_values,
     run_step,
+    safe_session_request,
 )
 
 PENDING_TOKEN_ERRORS = {"authorization_pending", "slow_down"}
@@ -58,6 +59,7 @@ class InteractiveSession:
     base_url_override: str
     http: requests.Session
     started: float
+    owner_user_id: str = ""
     member_stats: list[dict[str, StepStats]] = field(default_factory=list)
     context: dict[str, Any] | None = None
     base_url: str = ""
@@ -139,6 +141,7 @@ def start_interactive_run(
     environment: str | None,
     extra_env: dict[str, Any] | None,
     base_url_override: str | None,
+    owner_user_id: str | None = None,
 ) -> dict[str, Any]:
     collection, members = _load_members(scenario_path)
     if not members:
@@ -156,6 +159,7 @@ def start_interactive_run(
         base_url_override=str(base_url_override or "").strip(),
         http=requests.Session(),
         started=time.time(),
+        owner_user_id=str(owner_user_id or "").strip(),
     )
     with _SESSIONS_LOCK:
         _prune_sessions()
@@ -169,8 +173,8 @@ def start_interactive_run(
         raise
 
 
-def begin_user_auth(session_id: str, flow: str) -> dict[str, Any]:
-    session = _require_session(session_id)
+def begin_user_auth(session_id: str, flow: str, *, owner_user_id: str | None = None) -> dict[str, Any]:
+    session = _require_session(session_id, owner_user_id=owner_user_id)
     with session.lock:
         if session.phase != "choose_flow":
             raise ValueError("This run is not waiting for a sign-in method")
@@ -193,8 +197,8 @@ def begin_user_auth(session_id: str, flow: str) -> dict[str, Any]:
         return payload
 
 
-def advance_user_auth(session_id: str) -> dict[str, Any]:
-    session = _require_session(session_id)
+def advance_user_auth(session_id: str, *, owner_user_id: str | None = None) -> dict[str, Any]:
+    session = _require_session(session_id, owner_user_id=owner_user_id)
     with session.lock:
         if session.phase == "done":
             return _stored_result(session)
@@ -255,8 +259,8 @@ def advance_user_auth(session_id: str) -> dict[str, Any]:
             raise
 
 
-def cancel_user_auth(session_id: str) -> dict[str, Any]:
-    session = _require_session(session_id)
+def cancel_user_auth(session_id: str, *, owner_user_id: str | None = None) -> dict[str, Any]:
+    session = _require_session(session_id, owner_user_id=owner_user_id)
     with session.lock:
         session.phase = "cancelled"
         return {"status": "cancelled", "session_id": session.id}
@@ -300,11 +304,15 @@ def _stored_result(session: InteractiveSession) -> dict[str, Any]:
     return {"status": "failed", "session_id": session.id, "message": "Run already finished"}
 
 
-def _require_session(session_id: str) -> InteractiveSession:
+def _require_session(session_id: str, *, owner_user_id: str | None = None) -> InteractiveSession:
     with _SESSIONS_LOCK:
         _prune_sessions()
         session = _SESSIONS.get(str(session_id or "").strip())
     if session is None:
+        raise KeyError("Sign-in session expired or was cancelled")
+    expected = str(session.owner_user_id or "").strip()
+    provided = str(owner_user_id or "").strip()
+    if expected and expected != provided:
         raise KeyError("Sign-in session expired or was cancelled")
     return session
 
@@ -606,7 +614,8 @@ def _post_form(
         timeout = float(step.get("timeout") or timeout)
     env = session.context.get("env") if isinstance(session.context, dict) else None
     configure_http_session(session.http, env if isinstance(env, dict) else None)
-    response = session.http.request(
+    response = safe_session_request(
+        session.http,
         method="POST",
         url=url,
         headers=headers,
@@ -634,8 +643,7 @@ def _http_error(response: requests.Response, payload: Any) -> str:
 
 
 def _require_routable(url: str) -> None:
-    if is_forbidden_api_target(url):
-        raise ValueError(f"API hosts must be an IP or FQDN, not localhost or host.docker.internal: {url}")
+    ensure_safe_request_url(url)
 
 
 def _absolute_verification(uri: str, issuer_or_base: str) -> str:

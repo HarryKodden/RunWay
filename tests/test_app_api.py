@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import ipaddress
 import json
 from pathlib import Path
 
 import requests
 
 from webapp.app import mask_sensitive_text
+
+
+def _allow_public_dns(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "tools.scenario_runner.resolve_host_ips",
+        lambda host: [ipaddress.ip_address("93.184.216.34")],
+    )
 
 
 def test_health_and_index(client):
@@ -166,6 +174,7 @@ def test_test_step_reports_saved_discovery_fields(client, monkeypatch):
             url,
         )
 
+    _allow_public_dns(monkeypatch)
     monkeypatch.setattr("requests.Session.request", fake_request)
     response = client.post(
         "/api/test-step",
@@ -200,6 +209,7 @@ def test_failed_discovery_does_not_save_null_json_vars(client, monkeypatch):
     def fake_request(self, method, url, **kwargs):  # noqa: ARG001
         raise requests.ConnectionError("connection refused")
 
+    _allow_public_dns(monkeypatch)
     monkeypatch.setattr("requests.Session.request", fake_request)
     response = client.post(
         "/api/test-step",
@@ -224,6 +234,27 @@ def test_failed_discovery_does_not_save_null_json_vars(client, monkeypatch):
     assert body["saved"] == {}
     assert "issuer" not in body["context"]["vars"]
     assert "connection refused" in str(body["response_body"])
+
+
+def test_test_step_rejects_loopback_ip_aliases(client):
+    for url in (
+        "http://127.1:8080/api/health",
+        "http://0x7f000001:8080/api/health",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://10.0.1.20/",
+    ):
+        response = client.post(
+            "/api/test-step",
+            json={
+                "scenario": {
+                    "name": "ssrf_guard",
+                    "steps": [{"method": "GET", "url": url, "name": "probe"}],
+                },
+                "step_index": 0,
+            },
+        )
+        assert response.status_code == 400, url
+        assert "public" in response.json()["detail"].lower() or "localhost" in response.json()["detail"].lower()
 
 
 def test_validate_scenario_endpoint_accepts_token_exchange(client):

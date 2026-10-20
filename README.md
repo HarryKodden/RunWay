@@ -96,10 +96,17 @@ The app image does not include a database. Set `DATABASE_URL` to PostgreSQL in p
 | `OIDC_CLIENT_ID` | Confidential or public client id |
 | `OIDC_CLIENT_SECRET` | Client secret (optional for public PKCE clients) |
 | `OIDC_REDIRECT_URI` | Must match the IdP, e.g. `http://127.0.0.1:9011/auth/callback` |
+| `RUNWAY_DEV_MODE` | Required when OIDC is unset (`true` for local single-user only). Without OIDC or this flag the app refuses to start |
+| `RUNWAY_ALLOWED_HOSTS` | Comma-separated host suffixes allowed for outbound HTTP (e.g. `api.example.org`). When OIDC is enabled and this is empty, outbound calls are denied until you set it |
+| `RUNWAY_REQUIRE_HOST_ALLOWLIST` | Force allowlist even without OIDC. Set automatically when OIDC is enabled and `RUNWAY_ALLOWED_HOSTS` is empty |
+| `RUNWAY_ALLOW_PRIVATE_TARGETS` | Opt-in for RFC1918/CGNAT targets. Also requires `RUNWAY_ALLOW_PRIVATE_TARGETS_CONFIRM=I_UNDERSTAND`. Loopback, link-local, and metadata stay blocked |
+| `RUNWAY_ALLOW_EXEC` | Opt-in for `EXEC` steps. Even then only argv lists are accepted (`shell=True` strings are rejected) |
 
 OIDC uses authorization code + PKCE, scopes `openid profile email`, and an httpOnly `SameSite=Lax` session cookie. Users are stored by `issuer` + `sub`.
 
-If OIDC is not configured, the UI signs in as a local workspace user so Save / Import still persist to the database instead of `examples/`.
+If OIDC is not configured, set `RUNWAY_DEV_MODE=true`; the UI signs in as a local workspace user so Save / Import still persist to the database instead of `examples/`.
+
+Outbound HTTP from the app (test step, sequence, runs, interactive OAuth) requires a signed-in user. Hosts are DNS-resolved, blocked if private/loopback/metadata (including `127.1` / `0x7f000001`), pinned for the connect to stop rebinding, re-checked on redirects, and optionally limited by `RUNWAY_ALLOWED_HOSTS`.
 
 Migrations run on startup (`alembic upgrade head`). Runs stay ephemeral and are not stored.
 
@@ -276,6 +283,7 @@ Use Insomnia-style placeholders in your step URLs, headers, and bodies:
 | `{{ server : "https://api.example.org" }}` | `server` from the environment, or the quoted default if unset |
 | `{{ vars.some_id }}` | saved response field from a previous step |
 | `{{ random.gen_name }}` | configured random generator |
+| `{{ encode(vars.sample_url) }}` | URL-encode any placeholder value (for path segments / query parts) |
 
 #### Meta placeholders
 
@@ -296,6 +304,17 @@ If an environment is **named** like a host and has no `server` / `base_url` key,
 You can also set `"server": "{{ meta.environment }}"` explicitly.
 
 A colon after the name sets a default: `{{ name : "value" }}` or `{{ name : 0 }}`. That works in step fields and inside environment values, for example `"user_id": "{{ uid : 0 }}"`. Fill `uid` in **Environment values** to override it; leave it alone to keep `0`.
+
+Use `encode(...)` when a value must appear as a single path segment or query component — for example a full URL saved from an earlier step:
+
+```json
+{
+  "method": "GET",
+  "path": "/sample-path/{{ encode(vars.sample_url) }}"
+}
+```
+
+That is equivalent to percent-encoding with `encodeURIComponent` / `urllib.parse.quote(..., safe="")`. Environment keys can still use the `_encoded` companion pattern (`redirect_uri` + `redirect_uri_encoded`); `encode(...)` works for any placeholder, including `vars.*`.
 
 Environment values can also reference other keys in the same environment. Set a host once and reuse it:
 
@@ -467,6 +486,7 @@ The web UI can also edit a scenario as JSON. Open a scenario and choose **Edit s
 - Save entire response: `"save_response_as": "response_obj"`
 - Reuse saved var: `{{ vars.my_var }}`
 - Reuse nested object field: `{{ vars.response_obj.data.id }}`
+- URL-encode a value: `{{ encode(vars.sample_url) }}`
 - Random generator value: `{{ random.generator_name }}`
 - Timestamp placeholder: `{{ meta.now }}`
 - Unix epoch placeholder: `{{ meta.unix }}`

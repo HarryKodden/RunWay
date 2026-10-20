@@ -797,8 +797,12 @@ const FORBIDDEN_API_HOSTS = new Set([
   'host.docker.internal',
   'ip6-localhost',
   'ip6-loopback',
+  'metadata',
+  'metadata.google.internal',
+  'kubernetes.default',
+  'kubernetes.default.svc',
 ]);
-const ROUTABLE_HOST_HELP = 'API hosts must be an IP or FQDN, not localhost';
+const ROUTABLE_HOST_HELP = 'API hosts must be a public IP or FQDN (not localhost, private, or link-local)';
 
 function hostnameFromTarget(value) {
   const text = String(value || '').trim();
@@ -809,15 +813,134 @@ function hostnameFromTarget(value) {
   return (parsed?.host || '').toLowerCase();
 }
 
+function parseIpv4Part(part) {
+  const text = String(part || '').trim().toLowerCase();
+  if (!text) {
+    return null;
+  }
+  let value;
+  if (text.startsWith('0x')) {
+    value = Number.parseInt(text.slice(2), 16);
+  } else if (text.length > 1 && text.startsWith('0')) {
+    value = Number.parseInt(text, 8);
+  } else {
+    value = Number.parseInt(text, 10);
+  }
+  return Number.isInteger(value) && value >= 0 ? value : null;
+}
+
+function parseIpv4Literal(host) {
+  const name = String(host || '').trim().toLowerCase();
+  if (!name || name.includes(':')) {
+    return null;
+  }
+  if (/^\d+$/.test(name) || /^0x[0-9a-f]+$/i.test(name)) {
+    const value = name.startsWith('0x') ? Number.parseInt(name.slice(2), 16) : Number.parseInt(name, 10);
+    if (!Number.isInteger(value) || value < 0 || value > 0xffffffff) {
+      return null;
+    }
+    return [
+      (value >>> 24) & 0xff,
+      (value >>> 16) & 0xff,
+      (value >>> 8) & 0xff,
+      value & 0xff,
+    ];
+  }
+  const parts = name.split('.');
+  if (parts.length < 1 || parts.length > 4) {
+    return null;
+  }
+  const nums = parts.map(parseIpv4Part);
+  if (nums.some((item) => item == null)) {
+    return null;
+  }
+  let value = 0;
+  if (parts.length === 1) {
+    value = nums[0];
+  } else if (parts.length === 2) {
+    if (nums[0] > 0xff || nums[1] > 0xffffff) {
+      return null;
+    }
+    value = (nums[0] << 24) + nums[1];
+  } else if (parts.length === 3) {
+    if (nums[0] > 0xff || nums[1] > 0xff || nums[2] > 0xffff) {
+      return null;
+    }
+    value = (nums[0] << 24) + (nums[1] << 16) + nums[2];
+  } else {
+    if (nums.some((item) => item > 0xff)) {
+      return null;
+    }
+    value = (nums[0] << 24) + (nums[1] << 16) + (nums[2] << 8) + nums[3];
+  }
+  if (!Number.isInteger(value) || value < 0 || value > 0xffffffff) {
+    return null;
+  }
+  return [
+    (value >>> 24) & 0xff,
+    (value >>> 16) & 0xff,
+    (value >>> 8) & 0xff,
+    value & 0xff,
+  ];
+}
+
+function isBlockedIpv4(octets) {
+  if (!Array.isArray(octets) || octets.length !== 4) {
+    return false;
+  }
+  const [a, b] = octets;
+  if (a === 0 || a === 10 || a === 127 || a >= 224) {
+    return true;
+  }
+  if (a === 100 && b >= 64 && b <= 127) {
+    return true;
+  }
+  if (a === 169 && b === 254) {
+    return true;
+  }
+  if (a === 172 && b >= 16 && b <= 31) {
+    return true;
+  }
+  if (a === 192 && b === 168) {
+    return true;
+  }
+  if (a === 198 && (b === 18 || b === 19)) {
+    return true;
+  }
+  return false;
+}
+
+function isBlockedIpv6(host) {
+  const name = String(host || '').trim().toLowerCase().replace(/^\[|\]$/g, '');
+  if (!name.includes(':')) {
+    return false;
+  }
+  if (name === '::1' || name === '::' || name.startsWith('fe80:') || name.startsWith('fc') || name.startsWith('fd') || name.startsWith('ff')) {
+    return true;
+  }
+  if (name.startsWith('::ffff:')) {
+    const mapped = name.slice('::ffff:'.length);
+    const octets = parseIpv4Literal(mapped);
+    return octets ? isBlockedIpv4(octets) : false;
+  }
+  return false;
+}
+
 function isForbiddenApiHost(host) {
+  // UX-only mirror of server checks. Enforcement is server-side
+  // (ensure_safe_request_url / DNS pin / allowlist) — do not treat this as a security boundary.
   const name = String(host || '').trim().toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
   if (!name) {
     return false;
   }
-  if (FORBIDDEN_API_HOSTS.has(name)) {
+  if (FORBIDDEN_API_HOSTS.has(name) || name.endsWith('.localhost')) {
     return true;
   }
-  return name.endsWith('.localhost');
+  if (isBlockedIpv6(name)) {
+    return true;
+  }
+  const octets = parseIpv4Literal(name);
+  return octets ? isBlockedIpv4(octets) : false;
 }
 
 function isForbiddenApiTarget(value) {
@@ -827,6 +950,16 @@ function isForbiddenApiTarget(value) {
   const text = value.trim();
   if (!text || text.includes('{{')) {
     return false;
+  }
+  const withScheme = text.includes('://') ? text : `http://${text}`;
+  try {
+    const parsed = new URL(withScheme);
+    const scheme = parsed.protocol.replace(/:$/, '').toLowerCase();
+    if (scheme && scheme !== 'http' && scheme !== 'https') {
+      return true;
+    }
+  } catch {
+    return true;
   }
   return isForbiddenApiHost(hostnameFromTarget(text));
 }
@@ -851,8 +984,18 @@ function parsePlaceholderToken(raw) {
   };
 }
 
+function unwrapEncodeCall(raw) {
+  const text = String(raw || '').trim();
+  const match = text.match(/^encode\s*\(\s*([\s\S]+)\s*\)$/);
+  if (!match) {
+    return {encoded: false, inner: text};
+  }
+  return {encoded: true, inner: match[1].trim()};
+}
+
 function envPlaceholderPath(token) {
-  const {name} = parsePlaceholderToken(token);
+  const {inner} = unwrapEncodeCall(token);
+  const {name} = parsePlaceholderToken(inner);
   if (!name || name.startsWith('vars.') || name.startsWith('random.') || name.startsWith('meta.') || name.startsWith('json.') || name.startsWith('headers.') || name.startsWith('url_query.') || name.startsWith('location_query.')) {
     return null;
   }
@@ -866,7 +1009,8 @@ function envPlaceholderPath(token) {
 }
 
 function placeholderDefault(token) {
-  return parsePlaceholderToken(token).defaultValue;
+  const {inner} = unwrapEncodeCall(token);
+  return parsePlaceholderToken(inner).defaultValue;
 }
 
 function valueHasEnvPlaceholders(value) {
@@ -1721,14 +1865,18 @@ function expandMetaPlaceholders(value, environmentName) {
       return value;
     }
     return value.replace(/\{\{\s*([^}]+)\s*\}\}/g, (match, rawToken) => {
-      const {name, defaultValue} = parsePlaceholderToken(rawToken);
+      const {encoded, inner} = unwrapEncodeCall(rawToken);
+      const {name, defaultValue} = parsePlaceholderToken(inner);
       if (name !== 'meta.environment') {
         return match;
       }
       if (envName) {
-        return envName;
+        return encoded ? encodeURIComponent(envName) : envName;
       }
-      return defaultValue != null ? defaultValue : match;
+      if (defaultValue == null) {
+        return match;
+      }
+      return encoded ? encodeURIComponent(defaultValue) : defaultValue;
     });
   }
   if (Array.isArray(value)) {
@@ -1788,7 +1936,9 @@ function expandEnvPlaceholders(value) {
   }
   const env = environmentValuesForDisplay();
   return value.replace(/\{\{\s*([^}]+)\s*\}\}/g, (match, rawToken) => {
-    const {name, defaultValue} = parsePlaceholderToken(rawToken);
+    const {encoded, inner} = unwrapEncodeCall(rawToken);
+    const {name, defaultValue} = parsePlaceholderToken(inner);
+    const maybeEncode = (text) => (encoded ? encodeURIComponent(text) : text);
     let path = name;
     if (name.startsWith('env.')) {
       path = name.slice(4);
@@ -1797,20 +1947,20 @@ function expandEnvPlaceholders(value) {
     } else if (name === 'meta.environment') {
       const envName = getSelectedEnvironmentName();
       if (envName) {
-        return envName;
+        return maybeEncode(envName);
       }
-      return defaultValue != null ? defaultValue : match;
+      return defaultValue != null ? maybeEncode(defaultValue) : match;
     } else if (name.startsWith('vars.') || name.startsWith('random.') || name.startsWith('meta.') || name.startsWith('json.') || name.startsWith('headers.') || name.startsWith('url_query.') || name.startsWith('location_query.')) {
-      return defaultValue != null ? defaultValue : match;
+      return defaultValue != null ? maybeEncode(defaultValue) : match;
     }
     let resolved = lookupEnvPath(env, path);
     if (resolved == null && Object.prototype.hasOwnProperty.call(env, name)) {
       resolved = env[name];
     }
     if (resolved == null || resolved === '') {
-      return defaultValue != null ? defaultValue : match;
+      return defaultValue != null ? maybeEncode(defaultValue) : match;
     }
-    return String(resolved);
+    return maybeEncode(String(resolved));
   });
 }
 

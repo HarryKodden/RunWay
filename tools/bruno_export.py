@@ -40,6 +40,9 @@ def convert_placeholders(value: Any) -> Any:
         inner = match.group(1).strip()
         if not inner:
             return "{{}}"
+        encode_match = re.match(r"^encode\s*\(\s*(.+)\s*\)$", inner)
+        if encode_match:
+            inner = encode_match.group(1).strip()
         name_part = inner.split(":", 1)[0].strip()
         for prefix in _PREFIXES:
             if name_part.startswith(prefix):

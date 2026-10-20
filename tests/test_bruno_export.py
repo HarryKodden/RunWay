@@ -12,6 +12,7 @@ def test_convert_placeholders_strips_prefixes_and_defaults():
     assert convert_placeholders('{{ uid : 0 }}') == "{{uid}}"
     assert convert_placeholders('{{ server : "https://api.example.org" }}') == "{{server}}"
     assert convert_placeholders({"token": "{{ _.token }}"}) == {"token": "{{token}}"}
+    assert convert_placeholders("/sample-path/{{ encode( vars.sample_url) }}") == "/sample-path/{{sample_url}}"
 
 
 def test_collection_to_bruno_maps_scenarios_and_envs():

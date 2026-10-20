@@ -4,16 +4,19 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
 import random
 import re
 import shlex
+import socket
 import string
 import subprocess
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -39,6 +42,7 @@ from tools.oauth_helpers import (
 
 PLACEHOLDER_RE = re.compile(r"\{\{\s*([^}]+)\s*\}\}")
 PLACEHOLDER_NAME_RE = re.compile(r"^(?P<name>[A-Za-z_][\w.]*)(?:\s*:\s*(?P<default>.+))?$")
+ENCODE_CALL_RE = re.compile(r"^encode\s*\(\s*(.+)\s*\)$")
 CONNECTION_ENV_KEYS = {"server", "base_url", "baseUrl", "url", "mock_provider"}
 FORBIDDEN_API_HOSTS = frozenset({
     "localhost",
@@ -48,8 +52,42 @@ FORBIDDEN_API_HOSTS = frozenset({
     "host.docker.internal",
     "ip6-localhost",
     "ip6-loopback",
+    "metadata",
+    "metadata.google.internal",
+    "kubernetes.default",
+    "kubernetes.default.svc",
 })
-ROUTABLE_HOST_HELP = "API hosts must be an IP or FQDN, not localhost or host.docker.internal"
+ALLOWED_REQUEST_SCHEMES = frozenset({"http", "https"})
+# Extra non-global ranges not always covered by ipaddress.is_global quirks.
+_BLOCKED_NETWORKS = tuple(
+    ipaddress.ip_network(item)
+    for item in (
+        "0.0.0.0/8",
+        "10.0.0.0/8",
+        "100.64.0.0/10",
+        "127.0.0.0/8",
+        "169.254.0.0/16",
+        "172.16.0.0/12",
+        "192.0.0.0/24",
+        "192.0.2.0/24",
+        "192.168.0.0/16",
+        "198.18.0.0/15",
+        "198.51.100.0/24",
+        "203.0.113.0/24",
+        "224.0.0.0/4",
+        "240.0.0.0/4",
+        "::/128",
+        "::1/128",
+        "fc00::/7",
+        "fe80::/10",
+        "ff00::/8",
+        "2001:db8::/32",
+    )
+)
+ROUTABLE_HOST_HELP = (
+    "API hosts must be a public IP or FQDN "
+    "(not localhost, private, link-local, or cloud metadata addresses)"
+)
 
 
 def env_flag(value: Any) -> bool | None:
@@ -98,24 +136,251 @@ def parse_target_hostname(value: str) -> str:
     return host.strip("[]").lower().rstrip(".")
 
 
-def is_forbidden_api_host(host: str | None) -> bool:
+def allow_private_api_targets() -> bool:
+    """Opt-in for trusted/local deployments that must reach RFC1918 hosts.
+
+    Ignored unless ``RUNWAY_ALLOW_PRIVATE_TARGETS_CONFIRM=I_UNDERSTAND`` is also set,
+    so a lone env typo cannot widen blast radius on shared hosts.
+    """
+    if not bool(env_flag(os.environ.get("RUNWAY_ALLOW_PRIVATE_TARGETS"))):
+        return False
+    return str(os.environ.get("RUNWAY_ALLOW_PRIVATE_TARGETS_CONFIRM") or "").strip() == "I_UNDERSTAND"
+
+
+def allow_exec_steps() -> bool:
+    """EXEC steps are off by default; enable only on trusted single-user hosts."""
+    return bool(env_flag(os.environ.get("RUNWAY_ALLOW_EXEC")))
+
+
+def egress_host_allowlist() -> frozenset[str] | None:
+    """Comma-separated host suffixes from ``RUNWAY_ALLOWED_HOSTS``, or None if unset."""
+    raw = str(os.environ.get("RUNWAY_ALLOWED_HOSTS") or "").strip()
+    if not raw:
+        return None
+    return frozenset(part.strip().lower().rstrip(".") for part in raw.split(",") if part.strip())
+
+
+def require_egress_allowlist() -> bool:
+    return bool(env_flag(os.environ.get("RUNWAY_REQUIRE_HOST_ALLOWLIST")))
+
+
+def host_permitted_by_allowlist(host: str) -> bool:
+    name = (host or "").strip().lower().rstrip(".")
+    if not name:
+        return False
+    allowed = egress_host_allowlist()
+    if allowed is None:
+        return not require_egress_allowlist()
+    for entry in allowed:
+        if not entry:
+            continue
+        suffix = entry.lstrip(".")
+        if not suffix:
+            continue
+        if name == suffix or name.endswith("." + suffix):
+            return True
+    return False
+
+
+def parse_ip_literal(host: str | None) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """Parse IP literals including alternate IPv4 forms (127.1, 0x7f000001, …)."""
+    name = (host or "").strip().lower()
+    if name.startswith("[") and name.endswith("]"):
+        name = name[1:-1]
+    if not name:
+        return None
+    if "%" in name:
+        name = name.split("%", 1)[0]
+    try:
+        return ipaddress.ip_address(name)
+    except ValueError:
+        pass
+    try:
+        return ipaddress.IPv4Address(socket.inet_aton(name))
+    except OSError:
+        return None
+
+
+def is_blocked_ip(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    if address.version == 6 and address.ipv4_mapped is not None:
+        return is_blocked_ip(address.ipv4_mapped)
+    if any(address in network for network in _BLOCKED_NETWORKS):
+        if allow_private_api_targets() and (
+            address.is_private and not address.is_loopback and not address.is_link_local
+        ):
+            return False
+        return True
+    if not address.is_global:
+        if allow_private_api_targets() and address.is_private and not address.is_loopback and not address.is_link_local:
+            return False
+        return True
+    return False
+
+
+def resolve_host_ips(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+    """Resolve a hostname; raise ValueError when DNS fails."""
+    literal = parse_ip_literal(host)
+    if literal is not None:
+        return [literal]
+    try:
+        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise ValueError(f"cannot resolve host {host!r}") from exc
+    found: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
+    seen: set[str] = set()
+    for info in infos:
+        raw = info[4][0]
+        try:
+            address = ipaddress.ip_address(raw)
+        except ValueError:
+            continue
+        key = str(address)
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append(address)
+    if not found:
+        raise ValueError(f"cannot resolve host {host!r}")
+    return found
+
+
+def is_forbidden_api_host(host: str | None, *, resolve_dns: bool = False) -> bool:
     name = (host or "").strip().lower().rstrip(".")
     if name.startswith("[") and name.endswith("]"):
         name = name[1:-1]
     if not name:
         return False
-    if name in FORBIDDEN_API_HOSTS:
+    if name in FORBIDDEN_API_HOSTS or name.endswith(".localhost"):
         return True
-    return name.endswith(".localhost")
+    literal = parse_ip_literal(name)
+    if literal is not None:
+        return is_blocked_ip(literal)
+    if not resolve_dns:
+        return False
+    try:
+        return any(is_blocked_ip(address) for address in resolve_host_ips(name))
+    except ValueError:
+        # Fail closed when callers ask for a DNS-backed decision.
+        return True
 
 
-def is_forbidden_api_target(value: Any) -> bool:
+def is_forbidden_api_target(value: Any, *, resolve_dns: bool = False) -> bool:
     if not isinstance(value, str):
         return False
     text = value.strip()
     if not text or "{{" in text:
         return False
-    return is_forbidden_api_host(parse_target_hostname(text))
+    parsed = urlparse(text if "://" in text else f"http://{text}")
+    if parsed.scheme and parsed.scheme.lower() not in ALLOWED_REQUEST_SCHEMES:
+        return True
+    return is_forbidden_api_host(parse_target_hostname(text), resolve_dns=resolve_dns)
+
+
+def ensure_safe_request_url(url: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+    """Reject unsafe URLs; return the validated address set used to pin the connect."""
+    text = str(url or "").strip()
+    if not text:
+        raise ValueError(ROUTABLE_HOST_HELP)
+    parsed = urlparse(text)
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in ALLOWED_REQUEST_SCHEMES:
+        raise ValueError(f"{ROUTABLE_HOST_HELP}: unsupported scheme {scheme or '(none)'}")
+    host = (parsed.hostname or "").strip("[]").lower().rstrip(".")
+    if not host:
+        raise ValueError(ROUTABLE_HOST_HELP)
+    if is_forbidden_api_host(host, resolve_dns=False):
+        raise ValueError(f"{ROUTABLE_HOST_HELP}: {host}")
+    if not host_permitted_by_allowlist(host):
+        raise ValueError(f"Host not in RUNWAY_ALLOWED_HOSTS: {host}")
+    try:
+        addresses = resolve_host_ips(host)
+    except ValueError as exc:
+        raise ValueError(str(exc)) from exc
+    if any(is_blocked_ip(address) for address in addresses):
+        raise ValueError(f"{ROUTABLE_HOST_HELP}: {host}")
+    safe = [address for address in addresses if not is_blocked_ip(address)]
+    if not safe:
+        raise ValueError(f"{ROUTABLE_HOST_HELP}: {host}")
+    return safe
+
+
+_ORIG_GETADDRINFO = socket.getaddrinfo
+_PIN_STACK = threading.local()
+_GETADDRINFO_HOOKED = False
+
+
+def _pinned_getaddrinfo(host: str, port: Any, *args: Any, **kwargs: Any) -> list[Any]:
+    frames = getattr(_PIN_STACK, "frames", None)
+    if frames:
+        expected_host, addresses = frames[-1]
+        name = str(host or "").strip("[]").lower().rstrip(".")
+        if name == expected_host:
+            port_num = int(port) if str(port or "").isdigit() else 0
+            family = args[0] if args else kwargs.get("family", 0)
+            socktype = args[1] if len(args) > 1 else kwargs.get("type", socket.SOCK_STREAM)
+            proto = args[2] if len(args) > 2 else kwargs.get("proto", 0)
+            results: list[Any] = []
+            for address in addresses:
+                if address.version == 4:
+                    if family not in (0, socket.AF_UNSPEC, socket.AF_INET):
+                        continue
+                    results.append(
+                        (socket.AF_INET, socktype or socket.SOCK_STREAM, proto or 0, "", (str(address), port_num))
+                    )
+                else:
+                    if family not in (0, socket.AF_UNSPEC, socket.AF_INET6):
+                        continue
+                    results.append(
+                        (
+                            socket.AF_INET6,
+                            socktype or socket.SOCK_STREAM,
+                            proto or 0,
+                            "",
+                            (str(address), port_num, 0, 0),
+                        )
+                    )
+            if results:
+                return results
+            raise socket.gaierror(socket.EAI_NONAME, f"pinned resolution miss for {host!r}")
+    return _ORIG_GETADDRINFO(host, port, *args, **kwargs)
+
+
+def _ensure_getaddrinfo_hook() -> None:
+    global _GETADDRINFO_HOOKED
+    if _GETADDRINFO_HOOKED:
+        return
+    socket.getaddrinfo = _pinned_getaddrinfo  # type: ignore[assignment]
+    _GETADDRINFO_HOOKED = True
+
+
+@contextmanager
+def pinned_host_resolution(host: str, addresses: list[ipaddress.IPv4Address | ipaddress.IPv6Address]):
+    """Force subsequent DNS lookups for ``host`` to the already-validated addresses."""
+    _ensure_getaddrinfo_hook()
+    name = (host or "").strip("[]").lower().rstrip(".")
+    frames = getattr(_PIN_STACK, "frames", None)
+    if frames is None:
+        _PIN_STACK.frames = []
+        frames = _PIN_STACK.frames
+    frames.append((name, list(addresses)))
+    try:
+        yield
+    finally:
+        frames.pop()
+
+
+def safe_session_request(
+    session: requests.Session,
+    *,
+    method: str,
+    url: str,
+    **kwargs: Any,
+) -> requests.Response:
+    """Validate URL, pin DNS to safe IPs, then perform the request."""
+    addresses = ensure_safe_request_url(url)
+    host = parse_target_hostname(url)
+    with pinned_host_resolution(host, addresses):
+        return session.request(method=method, url=url, **kwargs)
 
 
 def forbidden_api_targets(values: dict[str, Any] | None, extra_urls: list[str] | None = None) -> list[str]:
@@ -229,6 +494,22 @@ def parse_placeholder_token(raw: str) -> tuple[str, str | None]:
     return match.group("name"), default
 
 
+def unwrap_encode_call(raw: str) -> tuple[bool, str]:
+    """Detect `encode(...)` wrapper used for URL-encoding a placeholder value."""
+    text = str(raw or "").strip()
+    match = ENCODE_CALL_RE.match(text)
+    if not match:
+        return False, text
+    return True, match.group(1).strip()
+
+
+def url_encode_value(value: Any) -> str:
+    """Percent-encode a value for safe use in a path segment or query component."""
+    if value is None:
+        return ""
+    return quote(str(value), safe="")
+
+
 def _is_blank_resolved(value: Any) -> bool:
     if value is None:
         return True
@@ -262,6 +543,9 @@ def resolve_named_token(token: str, context: dict[str, Any], random_generators: 
 
 
 def resolve_token(token: str, context: dict[str, Any], random_generators: dict[str, Any]) -> Any:
+    encoded, inner = unwrap_encode_call(token)
+    if encoded:
+        return url_encode_value(resolve_token(inner, context, random_generators))
     name, default = parse_placeholder_token(token)
     resolved = resolve_named_token(name, context, random_generators)
     if _is_blank_resolved(resolved) and default is not None:
@@ -273,8 +557,11 @@ def expand_placeholder_defaults(value: str) -> str:
     """Replace `{{ name : "default" }}` with the default for inspection only."""
 
     def repl(match: re.Match[str]) -> str:
-        _name, default = parse_placeholder_token(match.group(1))
-        return default if default is not None else match.group(0)
+        encoded, inner = unwrap_encode_call(match.group(1))
+        _name, default = parse_placeholder_token(inner)
+        if default is None:
+            return match.group(0)
+        return url_encode_value(default) if encoded else default
 
     return PLACEHOLDER_RE.sub(repl, str(value or ""))
 
@@ -289,13 +576,17 @@ def expand_meta_placeholders(value: Any, *, environment: str | None = None) -> A
             return value
 
         def repl(match: re.Match[str]) -> str:
-            name, default = parse_placeholder_token(match.group(1))
+            encoded, inner = unwrap_encode_call(match.group(1))
+            name, default = parse_placeholder_token(inner)
             if not name.startswith("meta."):
                 return match.group(0)
             resolved = resolve_named_token(name, context, {})
             if _is_blank_resolved(resolved):
-                return default if default is not None else match.group(0)
-            return "" if resolved is None else str(resolved)
+                if default is None:
+                    return match.group(0)
+                return url_encode_value(default) if encoded else default
+            text = "" if resolved is None else str(resolved)
+            return url_encode_value(text) if encoded else text
 
         return PLACEHOLDER_RE.sub(repl, value)
     if isinstance(value, dict):
@@ -355,7 +646,8 @@ def resolve_environment_values(scenario: dict[str, Any], selected_environment: s
 
 
 def _environment_ref_path(token: str) -> str | None:
-    name, _default = parse_placeholder_token(token)
+    _encoded, inner = unwrap_encode_call(token)
+    name, _default = parse_placeholder_token(inner)
     if name.startswith(("vars.", "random.", "meta.", "json.", "headers.", "url_query.", "location_query.")):
         return None
     if name.startswith("env."):
@@ -366,7 +658,8 @@ def _environment_ref_path(token: str) -> str | None:
 
 
 def _placeholder_default(token: str) -> str | None:
-    _name, default = parse_placeholder_token(token)
+    _encoded, inner = unwrap_encode_call(token)
+    _name, default = parse_placeholder_token(inner)
     return default
 
 
@@ -468,7 +761,7 @@ def apply_encoded_companions(values: dict[str, Any]) -> dict[str, Any]:
             continue
         if not value.strip() or _value_has_env_placeholders(value):
             continue
-        applied[encoded_key] = quote(value, safe="")
+        applied[encoded_key] = url_encode_value(value)
     return applied
 
 
@@ -875,7 +1168,8 @@ def smart_follow(
 
     for _ in range(max_redirects + 1):
         try:
-            last_response = session.request(
+            last_response = safe_session_request(
+                session,
                 method=current_method,
                 url=current_url,
                 headers=current_headers,
@@ -884,6 +1178,8 @@ def smart_follow(
                 timeout=timeout,
                 allow_redirects=False,
             )
+        except ValueError:
+            raise
         except requests.RequestException:
             latency_ms = (time.perf_counter() - started) * 1000
             return last_response, current_url, latency_ms
@@ -898,19 +1194,21 @@ def smart_follow(
             return last_response, current_url, latency_ms
 
         next_url = resolve_redirect_url(current_url, location)
-        host = urlparse(next_url).hostname or ""
+        host = (urlparse(next_url).hostname or "").strip("[]").lower()
         path = urlparse(next_url).path or ""
         has_auth_code = bool(query_param(next_url, "code"))
         is_client_callback = any(host == h or host.endswith(h) for h in stop_hosts if h)
         is_callback_path = path in {"/callback", "/oauth/callback"} or path.endswith("/callback")
-        if is_client_callback or has_auth_code or (is_callback_path and host in {"localhost", "127.0.0.1"}):
+        if is_client_callback or has_auth_code or (is_callback_path and host in {"localhost", "127.0.0.1", "::1"}):
             # Synthetic response representing the client-callback redirect
             latency_ms = (time.perf_counter() - started) * 1000
             last_response.headers["X-Final-Location"] = next_url
             return last_response, next_url, latency_ms
 
-        if is_forbidden_api_host(host):
-            raise ValueError(f"{ROUTABLE_HOST_HELP}: redirect {next_url}")
+        try:
+            ensure_safe_request_url(next_url)
+        except ValueError as exc:
+            raise ValueError(f"{exc}: redirect {next_url}") from exc
 
         current_url = next_url
         current_method = "GET" if last_response.status_code in (302, 303) else current_method
@@ -984,7 +1282,8 @@ def missing_var_tokens(step: dict[str, Any], context: dict[str, Any]) -> list[st
     missing: list[str] = []
     vars_map = context.get("vars") if isinstance(context.get("vars"), dict) else {}
     for token in tokens:
-        name, default = parse_placeholder_token(token)
+        _encoded, inner = unwrap_encode_call(token)
+        name, default = parse_placeholder_token(inner)
         if not name.startswith("vars."):
             continue
         value = path_get(vars_map, name[5:], None)
@@ -1065,13 +1364,16 @@ def run_http_step(
     payload_json = request["json"]
     payload_data = request["data"]
     timeout = float(step.get("timeout", 15))
-    if is_forbidden_api_target(url):
-        return False, False, 0.0, {"error": ROUTABLE_HOST_HELP, "url": url}, None, url, ROUTABLE_HOST_HELP
+    try:
+        ensure_safe_request_url(url)
+    except ValueError as exc:
+        message = str(exc) or ROUTABLE_HOST_HELP
+        return False, False, 0.0, {"error": message, "url": url}, None, url, message
 
     follow = step.get("follow_redirects", False)
     max_redirects = int(step.get("max_redirects", 10))
     # Stop smart-redirects on 127.0.0.1 client callbacks only. API hops must
-    # use an IP or FQDN; localhost is rejected below.
+    # use a public IP or FQDN; private/loopback targets are rejected below.
     stop_hosts = step.get("stop_redirect_hosts") or ["127.0.0.1"]
     if isinstance(stop_hosts, str):
         stop_hosts = [stop_hosts]
@@ -1098,7 +1400,8 @@ def run_http_step(
     else:
         started = time.perf_counter()
         try:
-            response = session.request(
+            response = safe_session_request(
+                session,
                 method=method,
                 url=url,
                 headers=headers,
@@ -1195,22 +1498,31 @@ def run_poll_step(
 
 
 def run_exec_step(step: dict[str, Any], context: dict[str, Any], random_generators: dict[str, Any]) -> tuple[bool, bool, float]:
+    context.setdefault("vars", {})
+    if not allow_exec_steps():
+        context["vars"]["exec_error"] = "EXEC disabled; set RUNWAY_ALLOW_EXEC=true on trusted hosts only"
+        return False, True, 0.0
+
     command = render_template(step.get("command") or step.get("exec"), context, random_generators)
+    if not isinstance(command, list) or not command or not all(isinstance(part, (str, int, float)) for part in command):
+        context["vars"]["exec_error"] = "EXEC requires a non-empty argv list (shell strings are not allowed)"
+        return False, True, 0.0
+    argv = [str(part) for part in command]
+
     cwd = render_template(step.get("cwd"), context, random_generators)
     env = os.environ.copy()
     extra_env = render_template(step.get("env", {}), context, random_generators) or {}
     if isinstance(extra_env, dict):
         env.update({str(k): str(v) for k, v in extra_env.items()})
     if cwd and not Path(str(cwd)).is_dir() and step.get("skip_if_cwd_missing"):
-        context.setdefault("vars", {})
         context["vars"]["exec_skipped"] = f"cwd missing: {cwd}"
         return True, False, 0.0
 
     started = time.perf_counter()
     try:
         completed = subprocess.run(
-            command if isinstance(command, list) else str(command),
-            shell=not isinstance(command, list),
+            argv,
+            shell=False,
             cwd=str(cwd) if cwd else None,
             env=env,
             capture_output=True,
@@ -1221,14 +1533,12 @@ def run_exec_step(step: dict[str, Any], context: dict[str, Any], random_generato
         latency_ms = (time.perf_counter() - started) * 1000
         expected_code = step.get("expected_exit_code", 0)
         ok = completed.returncode == int(expected_code)
-        context.setdefault("vars", {})
         context["vars"][step.get("save_stdout", "exec_stdout")] = completed.stdout
         context["vars"][step.get("save_stderr", "exec_stderr")] = completed.stderr
         context["vars"][step.get("save_exit_code", "exec_exit_code")] = completed.returncode
         return ok, (not ok), latency_ms
     except Exception as exc:
         latency_ms = (time.perf_counter() - started) * 1000
-        context.setdefault("vars", {})
         context["vars"]["exec_error"] = str(exc)
         return False, True, latency_ms
 

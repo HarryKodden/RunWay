@@ -19,6 +19,12 @@ if TEST_DB.exists():
 os.environ["DATA_DIR"] = str(DATA_DIR)
 os.environ["DATABASE_URL"] = f"sqlite+pysqlite:///{TEST_DB.as_posix()}"
 os.environ["SESSION_SECRET"] = "test-session-secret"
+os.environ["RUNWAY_DEV_MODE"] = "true"
+os.environ.pop("RUNWAY_REQUIRE_HOST_ALLOWLIST", None)
+os.environ.pop("RUNWAY_ALLOWED_HOSTS", None)
+os.environ.pop("RUNWAY_ALLOW_EXEC", None)
+os.environ.pop("RUNWAY_ALLOW_PRIVATE_TARGETS", None)
+os.environ.pop("RUNWAY_ALLOW_PRIVATE_TARGETS_CONFIRM", None)
 for key in ("OIDC_ISSUER", "OIDC_CLIENT_ID", "OIDC_CLIENT_SECRET", "OIDC_REDIRECT_URI", "SESSION_SECURE"):
     os.environ.pop(key, None)
 

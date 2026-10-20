@@ -108,6 +108,20 @@ configure_oauth()
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    from tools.scenario_runner import allow_private_api_targets, egress_host_allowlist, env_flag
+
+    if not oidc_enabled() and not env_flag(os.environ.get("RUNWAY_DEV_MODE")):
+        raise RuntimeError(
+            "OIDC is required for shared deployments. Set OIDC_ISSUER/OIDC_CLIENT_ID/OIDC_REDIRECT_URI, "
+            "or set RUNWAY_DEV_MODE=true for local single-user development."
+        )
+    if oidc_enabled() and egress_host_allowlist() is None:
+        # Fail closed: authenticated open-proxy must be scoped to an allowlist.
+        os.environ["RUNWAY_REQUIRE_HOST_ALLOWLIST"] = "true"
+    if bool(env_flag(os.environ.get("RUNWAY_ALLOW_PRIVATE_TARGETS"))) and not allow_private_api_targets():
+        raise RuntimeError(
+            "RUNWAY_ALLOW_PRIVATE_TARGETS requires RUNWAY_ALLOW_PRIVATE_TARGETS_CONFIRM=I_UNDERSTAND"
+        )
     run_migrations()
     yield
 
@@ -1123,7 +1137,7 @@ async def import_scenario(
 @app.post("/api/runs")
 def start_run(
     payload: dict[str, Any],
-    user: User | None = Depends(current_user_optional),
+    user: User = Depends(current_user_required),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     scenario_file = payload.get("scenario_file")
@@ -1149,8 +1163,6 @@ def start_run(
             scenario_duration = "60"
 
     workspace_run = is_workspace_path(str(scenario_file))
-    if workspace_run and user is None:
-        raise HTTPException(status_code=401, detail="Sign in required")
 
     with tempfile.TemporaryDirectory(prefix="lti-run-") as tmp:
         tmp_dir = Path(tmp)
@@ -1158,7 +1170,7 @@ def start_run(
         overrides = payload.get("environment_overrides")
         if not isinstance(overrides, dict):
             overrides = {}
-        if workspace_run and user is not None:
+        if workspace_run:
             run_file = str(materialize_workspace_run(db, user, str(scenario_file), tmp_dir))
             collection_id, _filename = parse_workspace_path(str(scenario_file))
             stored = load_collection_env_values(db, user, collection_id, scenario_environment)
@@ -1195,6 +1207,7 @@ def start_run(
                     environment=scenario_environment or None,
                     extra_env=overrides if isinstance(overrides, dict) else {},
                     base_url_override=base_override or None,
+                    owner_user_id=user.id,
                 )
             except SystemExit as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1233,25 +1246,39 @@ def _interactive_http_error(exc: Exception) -> HTTPException:
 
 
 @app.post("/api/runs/interactive/{session_id}/begin")
-def interactive_begin(session_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+def interactive_begin(
+    session_id: str,
+    payload: dict[str, Any],
+    user: User = Depends(current_user_required),
+) -> dict[str, Any]:
     try:
-        return begin_user_auth(session_id, str((payload or {}).get("flow") or ""))
+        return begin_user_auth(
+            session_id,
+            str((payload or {}).get("flow") or ""),
+            owner_user_id=user.id,
+        )
     except (KeyError, ValueError) as exc:
         raise _interactive_http_error(exc) from exc
 
 
 @app.post("/api/runs/interactive/{session_id}/advance")
-def interactive_advance(session_id: str) -> dict[str, Any]:
+def interactive_advance(
+    session_id: str,
+    user: User = Depends(current_user_required),
+) -> dict[str, Any]:
     try:
-        return advance_user_auth(session_id)
+        return advance_user_auth(session_id, owner_user_id=user.id)
     except (KeyError, ValueError, SystemExit) as exc:
         raise _interactive_http_error(exc) from exc
 
 
 @app.post("/api/runs/interactive/{session_id}/cancel")
-def interactive_cancel(session_id: str) -> dict[str, Any]:
+def interactive_cancel(
+    session_id: str,
+    user: User = Depends(current_user_required),
+) -> dict[str, Any]:
     try:
-        return cancel_user_auth(session_id)
+        return cancel_user_auth(session_id, owner_user_id=user.id)
     except KeyError as exc:
         raise _interactive_http_error(exc) from exc
 
@@ -1298,7 +1325,10 @@ def scenario_auth_callback(request: Request) -> HTMLResponse:
 
 
 @app.post("/api/test-step")
-def test_step(payload: dict[str, Any]) -> dict[str, Any]:
+def test_step(
+    payload: dict[str, Any],
+    _user: User = Depends(current_user_required),
+) -> dict[str, Any]:
     step_index = payload.get("step_index")
     if not isinstance(step_index, int):
         raise HTTPException(status_code=400, detail="step_index must be an integer")
@@ -1388,7 +1418,10 @@ def parse_curl(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 @app.post("/api/preview-step")
-def preview_step(payload: dict[str, Any]) -> dict[str, Any]:
+def preview_step(
+    payload: dict[str, Any],
+    _user: User = Depends(current_user_required),
+) -> dict[str, Any]:
     step_index = payload.get("step_index")
     if not isinstance(step_index, int):
         raise HTTPException(status_code=400, detail="step_index must be an integer")
@@ -1418,7 +1451,10 @@ def preview_step(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 @app.post("/api/test-sequence")
-def test_sequence(payload: dict[str, Any]) -> dict[str, Any]:
+def test_sequence(
+    payload: dict[str, Any],
+    _user: User = Depends(current_user_required),
+) -> dict[str, Any]:
     base_url, context, random_generators, steps = _prepare_step_test(payload)
     session = requests.Session()
     results: list[dict[str, Any]] = []

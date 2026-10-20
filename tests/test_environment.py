@@ -68,6 +68,12 @@ def test_missing_placeholder_is_reported():
     assert "token" in missing
 
 
+def test_encode_placeholder_still_reports_missing_env():
+    steps = [{"method": "GET", "path": "/callback/{{ encode(env.redirect_uri) }}"}]
+    missing = missing_environment_dependencies({}, steps)
+    assert "redirect_uri" in missing
+
+
 def test_unused_empty_environment_keys_are_not_required():
     env = {"server": "https://api.example.org", "unused": ""}
     steps = [{"method": "GET", "path": "https://api.example.org/health"}]

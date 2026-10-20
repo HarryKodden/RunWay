@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import json
 from urllib.parse import parse_qs, urlparse
 
@@ -100,6 +101,18 @@ def _install_idp(monkeypatch):
             return _Response(200, {"active": True}, url)
         return _Response(404, {"error": "not_found", "path": path}, url)
 
+    monkeypatch.setattr(
+        "tools.scenario_runner.resolve_host_ips",
+        lambda host: [ipaddress.ip_address("93.184.216.34")],
+    )
+    monkeypatch.setattr(
+        "tools.interactive_run.ensure_safe_request_url",
+        lambda url: [ipaddress.ip_address("93.184.216.34")],
+    )
+    monkeypatch.setattr(
+        "tools.interactive_run.safe_session_request",
+        lambda session, method, url, **kwargs: session.request(method=method, url=url, **kwargs),
+    )
     monkeypatch.setattr(requests.Session, "request", fake_request)
     return calls
 

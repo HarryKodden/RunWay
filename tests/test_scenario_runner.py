@@ -8,6 +8,7 @@ from tools.scenario_runner import (
     apply_save,
     build_http_request,
     configure_http_session,
+    ensure_safe_request_url,
     evaluate_expectations,
     exported_context_vars,
     format_curl_command,
@@ -35,6 +36,30 @@ def test_forbidden_api_hosts():
     assert not is_forbidden_api_target("https://api.example.org")
 
 
+def test_forbidden_api_hosts_blocks_alternate_loopback_and_private_forms():
+    for host in (
+        "127.1",
+        "127.0.1",
+        "0x7f000001",
+        "2130706433",
+        "0177.0.0.1",
+        "0x7f.0.0.1",
+        "10.0.1.20",
+        "192.168.1.1",
+        "172.16.5.5",
+        "169.254.169.254",
+        "0.0.0.0",
+        "::1",
+        "[::1]",
+    ):
+        assert is_forbidden_api_host(host), host
+    assert is_forbidden_api_target("http://127.1:8080/api/health")
+    assert is_forbidden_api_target("http://0x7f000001:8080/")
+    assert is_forbidden_api_target("http://169.254.169.254/latest/meta-data/")
+    assert not is_forbidden_api_host("8.8.8.8")
+    assert not is_forbidden_api_target("https://1.1.1.1/dns-query")
+
+
 def test_require_routable_api_targets_allows_empty_or_public_host():
     require_routable_api_targets({}, extra_urls=[""])
     require_routable_api_targets({"server": "https://api.example.org"})
@@ -44,9 +69,115 @@ def test_require_routable_api_targets_rejects_localhost():
     try:
         require_routable_api_targets({"server": "http://localhost:8080"})
     except SystemExit as exc:
-        assert "localhost" in str(exc)
+        assert "localhost" in str(exc).lower() or "public" in str(exc).lower()
     else:
         raise AssertionError("expected SystemExit")
+
+
+def test_require_routable_api_targets_rejects_short_loopback():
+    try:
+        require_routable_api_targets({"server": "http://127.1:8080"})
+    except SystemExit:
+        return
+    raise AssertionError("expected SystemExit")
+
+
+def test_ensure_safe_request_url_rejects_blocked_destinations(monkeypatch):
+    import ipaddress
+
+    monkeypatch.setattr(
+        "tools.scenario_runner.resolve_host_ips",
+        lambda host: [ipaddress.ip_address("93.184.216.34")],
+    )
+    assert ensure_safe_request_url("https://example.org/path")
+    for url in (
+        "http://127.1:8080/api/health",
+        "http://0x7f000001/",
+        "file:///etc/passwd",
+        "http://169.254.169.254/",
+        "http://[::1]/",
+    ):
+        try:
+            ensure_safe_request_url(url)
+        except ValueError:
+            continue
+        raise AssertionError(f"expected ValueError for {url}")
+
+
+def test_ensure_safe_request_url_rejects_dns_to_private(monkeypatch):
+    import ipaddress
+
+    monkeypatch.setattr(
+        "tools.scenario_runner.resolve_host_ips",
+        lambda host: [ipaddress.ip_address("10.0.1.20")],
+    )
+    try:
+        ensure_safe_request_url("https://internal.example.org/secret")
+    except ValueError as exc:
+        assert "internal.example.org" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
+
+
+def test_egress_allowlist_and_dns_pin(monkeypatch):
+    import ipaddress
+    import socket
+
+    from tools.scenario_runner import host_permitted_by_allowlist, pinned_host_resolution
+
+    monkeypatch.setenv("RUNWAY_ALLOWED_HOSTS", "example.org,")
+    monkeypatch.delenv("RUNWAY_REQUIRE_HOST_ALLOWLIST", raising=False)
+    assert host_permitted_by_allowlist("api.example.org")
+    assert not host_permitted_by_allowlist("evil.example.com")
+
+    monkeypatch.setattr(
+        "tools.scenario_runner.resolve_host_ips",
+        lambda host: [ipaddress.ip_address("93.184.216.34")],
+    )
+    assert ensure_safe_request_url("https://api.example.org/x")
+    try:
+        ensure_safe_request_url("https://evil.example.com/x")
+    except ValueError as exc:
+        assert "RUNWAY_ALLOWED_HOSTS" in str(exc)
+    else:
+        raise AssertionError("expected allowlist rejection")
+
+    pinned = [ipaddress.ip_address("93.184.216.34")]
+    with pinned_host_resolution("example.org", pinned):
+        infos = socket.getaddrinfo("example.org", 443, type=socket.SOCK_STREAM)
+    assert infos
+    assert infos[0][4][0] == "93.184.216.34"
+
+
+def test_exec_disabled_by_default_and_rejects_shell_strings(monkeypatch):
+    from tools.scenario_runner import run_exec_step
+
+    context: dict = {"vars": {}, "env": {}}
+    ok, mismatch, _latency = run_exec_step(
+        {"method": "EXEC", "command": "echo pwned"},
+        context,
+        {},
+    )
+    assert ok is False and mismatch is True
+    assert "EXEC disabled" in context["vars"]["exec_error"]
+
+    monkeypatch.setenv("RUNWAY_ALLOW_EXEC", "true")
+    context = {"vars": {}, "env": {}}
+    ok, mismatch, _latency = run_exec_step(
+        {"method": "EXEC", "command": "echo pwned"},
+        context,
+        {},
+    )
+    assert ok is False and mismatch is True
+    assert "argv list" in context["vars"]["exec_error"]
+
+    context = {"vars": {}, "env": {}}
+    ok, mismatch, _latency = run_exec_step(
+        {"method": "EXEC", "command": ["true"]},
+        context,
+        {},
+    )
+    assert ok is True and mismatch is False
 
 
 def test_path_get_and_value_contains():
@@ -85,6 +216,30 @@ def test_render_template_uses_placeholder_defaults():
     assert render_template('{{ vars.user_id : "anon" }}', {"vars": {"user_id": 7}, "env": {}}, {}) == 7
     assert missing_var_tokens({"path": '{{ vars.user_id : "anon" }}'}, empty) == []
     assert missing_var_tokens({"path": "{{ vars.user_id }}"}, empty) == ["vars.user_id"]
+
+
+def test_render_template_encode_url_encodes_values():
+    context = {
+        "vars": {"sample_url": "https://example.org/a b?x=1"},
+        "env": {"redirect_uri": "https://app.example.org/callback"},
+    }
+    assert (
+        render_template("/sample-path/{{ encode( vars.sample_url) }}", context, {})
+        == "/sample-path/https%3A%2F%2Fexample.org%2Fa%20b%3Fx%3D1"
+    )
+    assert (
+        render_template("{{ encode(env.redirect_uri) }}", context, {})
+        == "https%3A%2F%2Fapp.example.org%2Fcallback"
+    )
+    assert (
+        render_template('{{ encode(vars.missing : "https://fallback.example.org/") }}', {"vars": {}, "env": {}}, {})
+        == "https%3A%2F%2Ffallback.example.org%2F"
+    )
+    assert missing_var_tokens({"path": "{{ encode(vars.sample_url) }}"}, {"vars": {}}) == ["vars.sample_url"]
+    assert missing_var_tokens(
+        {"path": '{{ encode(vars.sample_url : "https://x") }}'},
+        {"vars": {}},
+    ) == []
 
 
 def test_build_http_request_uses_defaulted_server():
