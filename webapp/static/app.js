@@ -1711,7 +1711,7 @@ function renderRequiredEnvPanel() {
       ? defaultValue
       : (name === 'redirect_uri'
         ? `${window.location.origin}/scenario-auth/callback`
-        : (CONNECTION_ENV_KEYS.has(name) ? 'http://192.168.1.10:8080' : `Value for ${name}`));
+        : (CONNECTION_ENV_KEYS.has(name) ? 'https://api.example.org' : `Value for ${name}`));
     if (name === 'api_key' || name.endsWith('_secret')) {
       input.type = 'password';
     }

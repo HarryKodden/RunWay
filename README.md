@@ -128,14 +128,14 @@ The CLI can still drive optional ApacheBench probes. That is not exposed in the 
 Run default HTTP probe:
 
 ```bash
-./bin/run.sh --host 192.168.1.10 --port 8080
+./bin/run.sh --host api.example.org --port 8080
 ```
 
 Run with custom targets:
 
 ```bash
 ./bin/run.sh \
-  --host 192.168.1.10 \
+  --host api.example.org \
   --port 8080 \
   --concurrency 100 \
   --requests 10000 \
@@ -148,7 +148,7 @@ Run a scenario as a load test (not regression):
 
 ```bash
 ./bin/run.sh \
-  --host 192.168.1.10 \
+  --host api.example.org \
   --port 8080 \
   --scenario-file ./examples/scenario.json \
   --scenario-users 30 \
@@ -376,7 +376,7 @@ The web UI can also edit a scenario as JSON. Open a scenario and choose **Edit s
 
 ```json
 {
-  "base_url": "http://192.168.1.10:8080",
+  "base_url": "https://api.example.org:8080",
   "random_generators": {
     "request_id": { "type": "uuid" },
     "email": { "type": "email", "prefix": "loadtest", "domain": "example.org" }
