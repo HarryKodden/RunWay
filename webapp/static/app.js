@@ -802,7 +802,7 @@ const FORBIDDEN_API_HOSTS = new Set([
   'kubernetes.default',
   'kubernetes.default.svc',
 ]);
-const ROUTABLE_HOST_HELP = 'API hosts must be a public IP or FQDN (not localhost, private, or link-local)';
+const ROUTABLE_HOST_HELP = 'API hosts must be an FQDN (not an IP address, localhost, private, or link-local)';
 
 function hostnameFromTarget(value) {
   const text = String(value || '').trim();
@@ -884,48 +884,6 @@ function parseIpv4Literal(host) {
   ];
 }
 
-function isBlockedIpv4(octets) {
-  if (!Array.isArray(octets) || octets.length !== 4) {
-    return false;
-  }
-  const [a, b] = octets;
-  if (a === 0 || a === 10 || a === 127 || a >= 224) {
-    return true;
-  }
-  if (a === 100 && b >= 64 && b <= 127) {
-    return true;
-  }
-  if (a === 169 && b === 254) {
-    return true;
-  }
-  if (a === 172 && b >= 16 && b <= 31) {
-    return true;
-  }
-  if (a === 192 && b === 168) {
-    return true;
-  }
-  if (a === 198 && (b === 18 || b === 19)) {
-    return true;
-  }
-  return false;
-}
-
-function isBlockedIpv6(host) {
-  const name = String(host || '').trim().toLowerCase().replace(/^\[|\]$/g, '');
-  if (!name.includes(':')) {
-    return false;
-  }
-  if (name === '::1' || name === '::' || name.startsWith('fe80:') || name.startsWith('fc') || name.startsWith('fd') || name.startsWith('ff')) {
-    return true;
-  }
-  if (name.startsWith('::ffff:')) {
-    const mapped = name.slice('::ffff:'.length);
-    const octets = parseIpv4Literal(mapped);
-    return octets ? isBlockedIpv4(octets) : false;
-  }
-  return false;
-}
-
 function isForbiddenApiHost(host) {
   // UX-only mirror of server checks. Enforcement is server-side
   // (ensure_safe_request_url / DNS pin / allowlist) — do not treat this as a security boundary.
@@ -936,11 +894,11 @@ function isForbiddenApiHost(host) {
   if (FORBIDDEN_API_HOSTS.has(name) || name.endsWith('.localhost')) {
     return true;
   }
-  if (isBlockedIpv6(name)) {
+  // Literal IPv4/IPv6 hosts are never accepted; only FQDNs may be targeted.
+  if (name.includes(':') || parseIpv4Literal(name)) {
     return true;
   }
-  const octets = parseIpv4Literal(name);
-  return octets ? isBlockedIpv4(octets) : false;
+  return false;
 }
 
 function isForbiddenApiTarget(value) {

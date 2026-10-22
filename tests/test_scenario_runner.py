@@ -56,8 +56,10 @@ def test_forbidden_api_hosts_blocks_alternate_loopback_and_private_forms():
     assert is_forbidden_api_target("http://127.1:8080/api/health")
     assert is_forbidden_api_target("http://0x7f000001:8080/")
     assert is_forbidden_api_target("http://169.254.169.254/latest/meta-data/")
-    assert not is_forbidden_api_host("8.8.8.8")
-    assert not is_forbidden_api_target("https://1.1.1.1/dns-query")
+    # Public IP literals are also rejected; only FQDNs are allowed.
+    assert is_forbidden_api_host("8.8.8.8")
+    assert is_forbidden_api_host("2001:4860:4860::8888")
+    assert is_forbidden_api_target("https://1.1.1.1/dns-query")
 
 
 def test_require_routable_api_targets_allows_empty_or_public_host():
@@ -69,7 +71,7 @@ def test_require_routable_api_targets_rejects_localhost():
     try:
         require_routable_api_targets({"server": "http://localhost:8080"})
     except SystemExit as exc:
-        assert "localhost" in str(exc).lower() or "public" in str(exc).lower()
+        assert "localhost" in str(exc).lower() or "fqdn" in str(exc).lower()
     else:
         raise AssertionError("expected SystemExit")
 
@@ -96,6 +98,9 @@ def test_ensure_safe_request_url_rejects_blocked_destinations(monkeypatch):
         "file:///etc/passwd",
         "http://169.254.169.254/",
         "http://[::1]/",
+        "https://8.8.8.8/",
+        "https://[2001:4860:4860::8888]/",
+        "https://1.1.1.1/dns-query",
     ):
         try:
             ensure_safe_request_url(url)

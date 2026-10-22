@@ -97,16 +97,16 @@ The app image does not include a database. Set `DATABASE_URL` to PostgreSQL in p
 | `OIDC_CLIENT_SECRET` | Client secret (optional for public PKCE clients) |
 | `OIDC_REDIRECT_URI` | Must match the IdP, e.g. `http://127.0.0.1:9011/auth/callback` |
 | `RUNWAY_DEV_MODE` | Required when OIDC is unset (`true` for local single-user only). Without OIDC or this flag the app refuses to start |
-| `RUNWAY_ALLOWED_HOSTS` | Comma-separated host suffixes allowed for outbound HTTP (e.g. `api.example.org`). When OIDC is enabled and this is empty, outbound calls are denied until you set it |
-| `RUNWAY_REQUIRE_HOST_ALLOWLIST` | Force allowlist even without OIDC. Set automatically when OIDC is enabled and `RUNWAY_ALLOWED_HOSTS` is empty |
-| `RUNWAY_ALLOW_PRIVATE_TARGETS` | Opt-in for RFC1918/CGNAT targets. Also requires `RUNWAY_ALLOW_PRIVATE_TARGETS_CONFIRM=I_UNDERSTAND`. Loopback, link-local, and metadata stay blocked |
+| `RUNWAY_ALLOWED_HOSTS` | Optional comma-separated host suffixes for outbound HTTP (e.g. `api.example.org`). When set, only matching FQDNs are allowed |
+| `RUNWAY_REQUIRE_HOST_ALLOWLIST` | When `true`, require `RUNWAY_ALLOWED_HOSTS` even if that list is empty (deny all outbound until configured) |
+| `RUNWAY_ALLOW_PRIVATE_TARGETS` | Opt-in for FQDNs that resolve to RFC1918/CGNAT. Also requires `RUNWAY_ALLOW_PRIVATE_TARGETS_CONFIRM=I_UNDERSTAND`. Loopback, link-local, metadata, and IP literals stay blocked |
 | `RUNWAY_ALLOW_EXEC` | Opt-in for `EXEC` steps. Even then only argv lists are accepted (`shell=True` strings are rejected) |
 
 OIDC uses authorization code + PKCE, scopes `openid profile email`, and an httpOnly `SameSite=Lax` session cookie. Users are stored by `issuer` + `sub`.
 
 If OIDC is not configured, set `RUNWAY_DEV_MODE=true`; the UI signs in as a local workspace user so Save / Import still persist to the database instead of `examples/`.
 
-Outbound HTTP from the app (test step, sequence, runs, interactive OAuth) requires a signed-in user. Hosts are DNS-resolved, blocked if private/loopback/metadata (including `127.1` / `0x7f000001`), pinned for the connect to stop rebinding, re-checked on redirects, and optionally limited by `RUNWAY_ALLOWED_HOSTS`.
+Outbound HTTP from the app (test step, sequence, runs, interactive OAuth) requires a signed-in user. Targets must be FQDNs (IPv4/IPv6 literals are rejected). Hosts are DNS-resolved, blocked if private/loopback/metadata, pinned for the connect to stop rebinding, re-checked on redirects, and optionally limited by `RUNWAY_ALLOWED_HOSTS`.
 
 Migrations run on startup (`alembic upgrade head`). Runs stay ephemeral and are not stored.
 
@@ -510,4 +510,4 @@ The web UI keeps only the last run in the page: a pass/fail list. It does not wr
 CLI runs write a folder under `results/` (summary.json and optional ApacheBench output). `--regression` skips ApacheBench.
 
 ## Notes
-- API hosts (`server`, `mock_provider`, `--host`) must be an IP or FQDN. Do not use localhost.
+- API hosts (`server`, `mock_provider`, `--host`) must be an FQDN. Do not use IP addresses or localhost.

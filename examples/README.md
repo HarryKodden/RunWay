@@ -31,7 +31,7 @@ printf '%s\n' '{"user_id":"1"}' > /tmp/demo-env.json
   --regression
 ```
 
-API hosts must be an IP or FQDN, not localhost.
+API hosts must be an FQDN, not an IP address or localhost.
 
 The `oauth2-server/` fixtures can stay on disk for local work; they are listed in `.gitignore` and are not part of the published repository.
 

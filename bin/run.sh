@@ -30,7 +30,7 @@ usage() {
 Usage: ./bin/run.sh [options]
 
 Options:
-  --host <host>              target host (IP or FQDN, not localhost)
+  --host <host>              target host (FQDN, not an IP address or localhost)
   --port <port>              target port (default: 8080)
   --scheme <http|https>      target scheme (default: http)
   --concurrency <n>          HTTP concurrency (default: 50)
@@ -100,18 +100,22 @@ forbidden_api_host() {
       return 0
       ;;
   esac
+  # Reject IPv4/IPv6 literals; only FQDNs are accepted.
+  if [[ "$host" == *:* ]] || [[ "$host" =~ ^[0-9.]+$ ]] || [[ "$host" =~ ^0x[0-9a-f]+$ ]]; then
+    return 0
+  fi
   return 1
 }
 
 if [[ -n "$HOST" ]]; then
   if forbidden_api_host "$HOST"; then
-    echo "API hosts must be an IP or FQDN, not localhost or host.docker.internal" >&2
+    echo "API hosts must be an FQDN, not an IP address, localhost, or host.docker.internal" >&2
     exit 1
   fi
   BASE_URL="${SCHEME}://${HOST}:${PORT}"
 else
   if [[ "$SCENARIO_ONLY" != "true" ]]; then
-    echo "--host is required and must be an IP or FQDN, not localhost" >&2
+    echo "--host is required and must be an FQDN, not an IP address or localhost" >&2
     exit 1
   fi
   BASE_URL=""

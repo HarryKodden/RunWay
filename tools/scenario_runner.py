@@ -85,8 +85,8 @@ _BLOCKED_NETWORKS = tuple(
     )
 )
 ROUTABLE_HOST_HELP = (
-    "API hosts must be a public IP or FQDN "
-    "(not localhost, private, link-local, or cloud metadata addresses)"
+    "API hosts must be an FQDN "
+    "(not an IP address, localhost, private, link-local, or cloud metadata)"
 )
 
 
@@ -252,9 +252,9 @@ def is_forbidden_api_host(host: str | None, *, resolve_dns: bool = False) -> boo
         return False
     if name in FORBIDDEN_API_HOSTS or name.endswith(".localhost"):
         return True
-    literal = parse_ip_literal(name)
-    if literal is not None:
-        return is_blocked_ip(literal)
+    # Literal IPv4/IPv6 hosts are never accepted; only FQDNs may be targeted.
+    if parse_ip_literal(name) is not None:
+        return True
     if not resolve_dns:
         return False
     try:
@@ -1373,7 +1373,7 @@ def run_http_step(
     follow = step.get("follow_redirects", False)
     max_redirects = int(step.get("max_redirects", 10))
     # Stop smart-redirects on 127.0.0.1 client callbacks only. API hops must
-    # use a public IP or FQDN; private/loopback targets are rejected below.
+    # use an FQDN; IP literals and private/loopback targets are rejected below.
     stop_hosts = step.get("stop_redirect_hosts") or ["127.0.0.1"]
     if isinstance(stop_hosts, str):
         stop_hosts = [stop_hosts]

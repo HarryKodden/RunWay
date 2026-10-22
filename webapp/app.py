@@ -108,16 +108,13 @@ configure_oauth()
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    from tools.scenario_runner import allow_private_api_targets, egress_host_allowlist, env_flag
+    from tools.scenario_runner import allow_private_api_targets, env_flag
 
     if not oidc_enabled() and not env_flag(os.environ.get("RUNWAY_DEV_MODE")):
         raise RuntimeError(
             "OIDC is required for shared deployments. Set OIDC_ISSUER/OIDC_CLIENT_ID/OIDC_REDIRECT_URI, "
             "or set RUNWAY_DEV_MODE=true for local single-user development."
         )
-    if oidc_enabled() and egress_host_allowlist() is None:
-        # Fail closed: authenticated open-proxy must be scoped to an allowlist.
-        os.environ["RUNWAY_REQUIRE_HOST_ALLOWLIST"] = "true"
     if bool(env_flag(os.environ.get("RUNWAY_ALLOW_PRIVATE_TARGETS"))) and not allow_private_api_targets():
         raise RuntimeError(
             "RUNWAY_ALLOW_PRIVATE_TARGETS requires RUNWAY_ALLOW_PRIVATE_TARGETS_CONFIRM=I_UNDERSTAND"

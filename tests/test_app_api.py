@@ -242,6 +242,8 @@ def test_test_step_rejects_loopback_ip_aliases(client):
         "http://0x7f000001:8080/api/health",
         "http://169.254.169.254/latest/meta-data/",
         "http://10.0.1.20/",
+        "https://8.8.8.8/",
+        "https://[2001:4860:4860::8888]/",
     ):
         response = client.post(
             "/api/test-step",
@@ -254,7 +256,8 @@ def test_test_step_rejects_loopback_ip_aliases(client):
             },
         )
         assert response.status_code == 400, url
-        assert "public" in response.json()["detail"].lower() or "localhost" in response.json()["detail"].lower()
+        detail = response.json()["detail"].lower()
+        assert "fqdn" in detail or "ip" in detail or "localhost" in detail
 
 
 def test_validate_scenario_endpoint_accepts_token_exchange(client):
