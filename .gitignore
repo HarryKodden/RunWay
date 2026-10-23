@@ -27,3 +27,5 @@ examples/oauth2-server/
 
 # docker-compose
 docker-compose.yml
+.coverage
+coverage.json

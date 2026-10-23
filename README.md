@@ -1,7 +1,6 @@
 # RunWay
 
 [![CI](https://github.com/HarryKodden/RunWay/actions/workflows/docker.yml/badge.svg)](https://github.com/HarryKodden/RunWay/actions/workflows/docker.yml)
-[![Coverage](https://codecov.io/gh/HarryKodden/RunWay/branch/main/graph/badge.svg)](https://codecov.io/gh/HarryKodden/RunWay)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
 [![GHCR](https://img.shields.io/badge/ghcr.io-harrykodden%2Frunway-2496ED?logo=docker&logoColor=white)](https://github.com/HarryKodden/RunWay/pkgs/container/runway)
 
@@ -50,13 +49,13 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-With coverage:
+With coverage (sources/omits come from `.coveragerc`; alembic is excluded):
 
 ```bash
-python -m pytest --cov=tools --cov=webapp --cov-report=term-missing
+python -m pytest --cov --cov-report=term-missing
 ```
 
-CI runs these tests (with coverage uploaded to Codecov) on every push and pull request, then builds the container image only if they pass.
+CI runs these tests on every push and pull request, then builds the container image only if they pass.
 
 Start the web frontend:
 

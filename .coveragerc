@@ -1,0 +1,9 @@
+[run]
+source = tools,webapp
+omit =
+    alembic/*
+    */alembic/*
+
+[report]
+show_missing = true
+skip_covered = false
