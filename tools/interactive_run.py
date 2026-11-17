@@ -61,6 +61,7 @@ class InteractiveSession:
     started: float
     owner_user_id: str = ""
     member_stats: list[dict[str, StepStats]] = field(default_factory=list)
+    member_reports: list[list[dict[str, Any]]] = field(default_factory=list)
     context: dict[str, Any] | None = None
     base_url: str = ""
     random_generators: dict[str, Any] = field(default_factory=dict)
@@ -390,6 +391,7 @@ def _ensure_member(session: InteractiveSession) -> None:
         "vars": {},
         "env": dict(environment_values),
         "constants": dict(constants),
+        "reports": [],
         "meta": {"environment": environment_name},
     }
     while len(session.member_stats) <= session.member_index:
@@ -400,6 +402,15 @@ def _close_member(session: InteractiveSession) -> None:
     _filename, child = session.members[session.member_index]
     vars_map = (session.context or {}).get("vars") if isinstance((session.context or {}).get("vars"), dict) else {}
     session.extra_env.update(exported_context_vars(vars_map, child.get("export_env")))
+    reports = (session.context or {}).get("reports") if isinstance((session.context or {}).get("reports"), list) else []
+    while len(session.member_reports) < session.member_index:
+        session.member_reports.append([])
+    if len(session.member_reports) == session.member_index:
+        session.member_reports.append([item for item in reports if isinstance(item, dict)])
+    else:
+        session.member_reports[session.member_index] = [item for item in reports if isinstance(item, dict)]
+    if isinstance(session.context, dict):
+        session.context["reports"] = []
 
 
 def _render_user_auth(step: dict[str, Any], session: InteractiveSession) -> dict[str, Any]:
@@ -715,6 +726,14 @@ def _finish(session: InteractiveSession) -> dict[str, Any]:
         total_success = sum(item["success"] for item in step_results)
         total_failure = sum(item["failure"] for item in step_results)
         total_mismatch = sum(item["expected_mismatch"] for item in step_results)
+        if index < len(session.member_reports):
+            reports = list(session.member_reports[index])
+        elif index == session.member_index and isinstance(session.context, dict):
+            reports = [
+                item for item in (session.context.get("reports") or []) if isinstance(item, dict)
+            ]
+        else:
+            reports = []
         child_results.append(
             {
                 "file": filename,
@@ -725,6 +744,7 @@ def _finish(session: InteractiveSession) -> dict[str, Any]:
                 "duration_s": round(elapsed, 3),
                 "iterations_per_user": 1,
                 "steps": step_results,
+                "reports": reports,
                 "totals": {
                     "requests": total_count,
                     "success": total_success,

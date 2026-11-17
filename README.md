@@ -297,6 +297,31 @@ Use Insomnia-style placeholders in your step URLs, headers, and bodies:
 | `{{ random.gen_name }}` | configured random generator |
 | `{{ encode(vars.sample_url) }}` | URL-encode any placeholder value (for path segments / query parts) |
 
+### Step reports (run Output)
+
+Mark steps whose responses should appear in the Results **Output** dialog after a run:
+
+```json
+{
+  "name": "register_client",
+  "method": "POST",
+  "path": "/register",
+  "save_response_as": "registration",
+  "report": true,
+  "expected_status": [200, 201]
+}
+```
+
+`report` forms:
+
+| Value | Effect |
+|---|---|
+| `true` | Include the response in Output (named from `save_response_as` or the step name) |
+| `"registration"` | Include in Output **and** save the response to `vars.registration` (like `save_response_as`) |
+| `{ "client_id": "{{ json.client_id }}", "status": "status_code" }` | Include a small object built from response/vars sources |
+
+The Results table shows **Scenario / Result / Output**. **Output** opens a dialog with every reported item from that scenario (including foreach iterations).
+
 ### Foreach (iterate a step over a list)
 
 Set `foreach` on a step to a list from constants or the environment (or a literal array). The step runs once per item. Inside the step, use `{{ item }}`, `{{ item.field }}`, and `{{ index }}` (0-based).

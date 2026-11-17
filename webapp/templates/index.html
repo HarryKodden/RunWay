@@ -233,6 +233,14 @@
                       <input id="step-expected-status" placeholder="200 or 200,201,204" />
                     </label>
                     <label>Save Response As <input id="step-save-response-as" placeholder="response_obj" /></label>
+                    <label>Report as
+                      <input id="step-report-as" placeholder="registration (or leave blank)" />
+                      <span class="muted">Include this response in run Output. A name also saves it like Save Response As.</span>
+                    </label>
+                    <label class="toggle-row">
+                      <input id="step-report" type="checkbox" />
+                      <span>Include response in run Output</span>
+                    </label>
                     <label>Foreach
                       <input id="step-foreach" placeholder="{% raw %}{{ constants.wallets }} or {{ env.uris }}{% endraw %}" />
                       <span class="muted">Runs once per list item as {% raw %}{{ item }} / {{ index }}{% endraw %}</span>
@@ -292,7 +300,7 @@
             <header class="panel-head section-head">
               <div>
                 <h2>Results</h2>
-                <p>Pass / fail from the last run</p>
+                <p>Scenario pass / fail and Output from the last run</p>
               </div>
             </header>
             <div id="report-summary" class="report-summary"></div>
@@ -300,6 +308,24 @@
               <p class="muted">Run tests to see pass / fail here.</p>
             </article>
           </section>
+
+          <div id="output-dialog" class="json-dialog hidden" role="dialog" aria-modal="true" aria-labelledby="output-dialog-title">
+            <div class="json-dialog-backdrop" data-close="true"></div>
+            <div class="json-dialog-card output-dialog-card">
+              <header class="modal-head section-head">
+                <div>
+                  <h2 id="output-dialog-title">Scenario output</h2>
+                  <p id="output-dialog-help" class="muted">Collected step reports from this run</p>
+                </div>
+                <button id="output-dialog-close-top" type="button" class="icon-btn">Close</button>
+              </header>
+              <pre id="output-dialog-body" class="console output-dialog-body"></pre>
+              <div class="actions row-end">
+                <button id="output-dialog-copy" type="button" class="ghost">Copy</button>
+                <button id="output-dialog-close" type="button" class="primary">Close</button>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </main>

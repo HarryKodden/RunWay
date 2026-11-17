@@ -61,6 +61,7 @@ STEP_FIELDS = {
     "seconds",
     "dpop_nonce_retry",
     "foreach",
+    "report",
 }
 
 AUTH_FIELDS = {"type", "username", "password", "token"}
@@ -278,6 +279,21 @@ def _check_step(step: Any, path: str, errors: list[str]) -> None:
         foreach = step["foreach"]
         if not isinstance(foreach, (str, list)):
             errors.append(f"{path}.foreach must be a string placeholder or an array")
+    if "report" in step:
+        report = step["report"]
+        if report is True:
+            pass
+        elif isinstance(report, str):
+            if not report.strip():
+                errors.append(f"{path}.report must be a non-empty string when set as text")
+        elif isinstance(report, dict):
+            for key, item in report.items():
+                if not str(key).strip():
+                    errors.append(f"{path}.report contains an empty key")
+                if not isinstance(item, str):
+                    errors.append(f"{path}.report.{key} must be a string source")
+        else:
+            errors.append(f"{path}.report must be true, a string name, or an object of save sources")
 
 
 def _check_auth(value: Any, path: str, errors: list[str]) -> None:

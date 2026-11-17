@@ -47,8 +47,18 @@ const stepPathResolved = document.getElementById('step-path-resolved');
 const stepTimeoutInput = document.getElementById('step-timeout');
 const stepExpectedStatusInput = document.getElementById('step-expected-status');
 const stepSaveResponseAsInput = document.getElementById('step-save-response-as');
+const stepReportAsInput = document.getElementById('step-report-as');
+const stepReportInput = document.getElementById('step-report');
 const stepForeachInput = document.getElementById('step-foreach');
+const outputDialog = document.getElementById('output-dialog');
+const outputDialogTitle = document.getElementById('output-dialog-title');
+const outputDialogHelp = document.getElementById('output-dialog-help');
+const outputDialogBody = document.getElementById('output-dialog-body');
+const outputDialogCopy = document.getElementById('output-dialog-copy');
+const outputDialogClose = document.getElementById('output-dialog-close');
+const outputDialogCloseTop = document.getElementById('output-dialog-close-top');
 const editStepHeadersJsonButton = document.getElementById('edit-step-headers-json');
+let lastRunOutputByKey = new Map();
 const editStepJsonButton = document.getElementById('edit-step-json');
 const editStepSaveJsonButton = document.getElementById('edit-step-save-json');
 const editStepExpectedJsonButton = document.getElementById('edit-step-expected-json');
@@ -2418,6 +2428,13 @@ function renderStepDetail() {
   stepTimeoutInput.value = step.timeout ?? '';
   stepExpectedStatusInput.value = formatExpectedStatus(step.expected_status);
   stepSaveResponseAsInput.value = step.save_response_as || '';
+  if (stepReportAsInput) {
+    stepReportAsInput.value = typeof step.report === 'string' ? step.report : '';
+  }
+  if (stepReportInput) {
+    stepReportInput.checked = step.report === true || (typeof step.report === 'string' && Boolean(step.report.trim()));
+    stepReportInput.disabled = Boolean(typeof step.report === 'object' && step.report && !Array.isArray(step.report));
+  }
   if (stepForeachInput) {
     stepForeachInput.value = typeof step.foreach === 'string'
       ? step.foreach
@@ -4590,14 +4607,42 @@ function firstStepError(steps) {
   return failed.last_error || (failed.last_status != null ? `status ${failed.last_status}` : '');
 }
 
+function outputKeyFor(name, index) {
+  return `${index}::${name || 'scenario'}`;
+}
+
+function formatReportsForDialog(reports, title) {
+  if (!Array.isArray(reports) || reports.length === 0) {
+    return 'No reported output for this scenario.';
+  }
+  const blocks = reports.map((entry, index) => {
+    const label = entry?.name || entry?.step || `item_${index + 1}`;
+    const meta = [];
+    if (entry?.step && entry.step !== label) meta.push(`step=${entry.step}`);
+    if (entry?.index != null) meta.push(`index=${entry.index}`);
+    if (entry?.status_code != null) meta.push(`status=${entry.status_code}`);
+    if (entry?.ok === true) meta.push('ok');
+    if (entry?.ok === false) meta.push('failed');
+    const header = meta.length ? `# ${label} (${meta.join(', ')})` : `# ${label}`;
+    const value = entry?.value;
+    const body = typeof value === 'string' ? value : JSON.stringify(value ?? null, null, 2);
+    return `${header}\n${body}`;
+  });
+  return `${title ? `${title}\n\n` : ''}${blocks.join('\n\n')}`;
+}
+
 function passFailRows(items) {
   return items.map((item) => {
     const ok = item.ok;
-    const error = ok ? '' : (item.error || '');
+    const entry = item.outputKey ? lastRunOutputByKey.get(item.outputKey) : null;
+    const hasOutput = Boolean(entry && Array.isArray(entry.reports) && entry.reports.length > 0);
+    const outputCell = hasOutput
+      ? `<button type="button" class="ghost output-open-btn" data-output-key="${escapeHtml(item.outputKey)}">Output</button>`
+      : '<span class="muted">—</span>';
     return `<tr class="${ok ? 'row-pass' : 'row-fail'}">
       <td>${escapeHtml(item.name || '')}</td>
       <td>${ok ? 'pass' : 'fail'}</td>
-      <td>${escapeHtml(error)}</td>
+      <td>${outputCell}</td>
     </tr>`;
   }).join('');
 }
@@ -4609,13 +4654,17 @@ function renderPassFailList(summary) {
   }
   const children = Array.isArray(scenario.scenarios) ? scenario.scenarios : null;
   if (children) {
-    const rows = passFailRows(children.map((child) => ({
-      name: child.name || child.file || '',
-      ok: scenarioTotalsPassed(child.totals),
-      error: firstStepError(child.steps),
-    })));
+    const rows = passFailRows(children.map((child, index) => {
+      const name = child.name || child.file || `scenario_${index + 1}`;
+      const key = outputKeyFor(name, index);
+      return {
+        name,
+        ok: scenarioTotalsPassed(child.totals),
+        outputKey: key,
+      };
+    }));
     return `<table class="results-table">
-      <thead><tr><th>Scenario</th><th>Result</th><th>Error</th></tr></thead>
+      <thead><tr><th>Scenario</th><th>Result</th><th>Output</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>`;
   }
@@ -4623,21 +4672,80 @@ function renderPassFailList(summary) {
   if (!steps.length) {
     return '<p class="muted">No steps in this run.</p>';
   }
-  const rows = passFailRows(steps.map((step) => ({
-    name: step.name || '',
-    ok: (step.failure || 0) === 0 && (step.expected_mismatch || 0) === 0,
-    error: String(step.last_error || ''),
-  })));
+  const scenarioName = scenario.name || 'scenario';
+  const key = outputKeyFor(scenarioName, 0);
+  const rows = passFailRows([{
+    name: scenarioName,
+    ok: scenarioTotalsPassed(scenario.totals) || (
+      (scenario.totals?.failure || 0) === 0
+      && (scenario.totals?.expected_mismatch || 0) === 0
+      && steps.every((step) => (step.failure || 0) === 0 && (step.expected_mismatch || 0) === 0)
+    ),
+    outputKey: key,
+  }]);
   return `<table class="results-table">
-    <thead><tr><th>Step</th><th>Result</th><th>Error</th></tr></thead>
+    <thead><tr><th>Scenario</th><th>Result</th><th>Output</th></tr></thead>
     <tbody>${rows}</tbody>
   </table>`;
+}
+
+function rememberRunOutputs(summary) {
+  lastRunOutputByKey = new Map();
+  const scenario = summary?.scenario;
+  if (!scenario) {
+    return;
+  }
+  const children = Array.isArray(scenario.scenarios) ? scenario.scenarios : null;
+  if (children) {
+    children.forEach((child, index) => {
+      const name = child.name || child.file || `scenario_${index + 1}`;
+      lastRunOutputByKey.set(
+        outputKeyFor(name, index),
+        {
+          title: name,
+          reports: Array.isArray(child.reports) ? child.reports : [],
+        },
+      );
+    });
+    return;
+  }
+  const name = scenario.name || 'scenario';
+  lastRunOutputByKey.set(
+    outputKeyFor(name, 0),
+    {
+      title: name,
+      reports: Array.isArray(scenario.reports) ? scenario.reports : [],
+    },
+  );
+}
+
+function openOutputDialog(outputKey) {
+  const entry = lastRunOutputByKey.get(outputKey);
+  if (!outputDialog || !outputDialogBody || !entry) {
+    return;
+  }
+  if (outputDialogTitle) {
+    outputDialogTitle.textContent = entry.title || 'Scenario output';
+  }
+  if (outputDialogHelp) {
+    const count = Array.isArray(entry.reports) ? entry.reports.length : 0;
+    outputDialogHelp.textContent = count
+      ? `${count} reported item${count === 1 ? '' : 's'} from this scenario`
+      : 'No reported output for this scenario';
+  }
+  outputDialogBody.textContent = formatReportsForDialog(entry.reports, entry.title);
+  outputDialog.classList.remove('hidden');
+}
+
+function closeOutputDialog() {
+  outputDialog?.classList.add('hidden');
 }
 
 function renderLastRunResults(summary) {
   if (!reportText) {
     return;
   }
+  rememberRunOutputs(summary);
   const scenario = summary?.scenario || {};
   const totals = scenario.totals || {};
   const children = Array.isArray(scenario.scenarios) ? scenario.scenarios : null;
@@ -5545,7 +5653,38 @@ jsonDialog.addEventListener('click', (event) => {
     closeJsonDialog();
   }
 });
+reportText?.addEventListener('click', (event) => {
+  const button = event.target.closest?.('.output-open-btn');
+  if (!button) {
+    return;
+  }
+  openOutputDialog(button.getAttribute('data-output-key') || '');
+});
+outputDialogClose?.addEventListener('click', closeOutputDialog);
+outputDialogCloseTop?.addEventListener('click', closeOutputDialog);
+outputDialog?.querySelector('.json-dialog-backdrop')?.addEventListener('click', closeOutputDialog);
+outputDialogCopy?.addEventListener('click', async () => {
+  const text = outputDialogBody?.textContent || '';
+  if (!text) {
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    outputDialogCopy.textContent = 'Copied';
+    setTimeout(() => {
+      if (outputDialogCopy) {
+        outputDialogCopy.textContent = 'Copy';
+      }
+    }, 1200);
+  } catch {
+    outputDialogCopy.textContent = 'Copy failed';
+  }
+});
 document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && outputDialog && !outputDialog.classList.contains('hidden')) {
+    closeOutputDialog();
+    return;
+  }
   if (event.key === 'Escape' && !jsonDialog.classList.contains('hidden')) {
     closeJsonDialog();
   }
@@ -5601,6 +5740,40 @@ bindStepField(stepSaveResponseAsInput, (step, element) => {
     return;
   }
   step.save_response_as = element.value.trim();
+});
+function syncStepReportField(step) {
+  if (!step) {
+    return;
+  }
+  if (typeof step.report === 'object' && step.report && !Array.isArray(step.report)) {
+    return;
+  }
+  const named = String(stepReportAsInput?.value || '').trim();
+  if (named) {
+    step.report = named;
+    if (stepReportInput) {
+      stepReportInput.checked = true;
+    }
+    return;
+  }
+  if (stepReportInput?.checked) {
+    step.report = true;
+    return;
+  }
+  delete step.report;
+}
+if (stepReportAsInput) {
+  bindStepField(stepReportAsInput, (step) => {
+    syncStepReportField(step);
+  });
+}
+stepReportInput?.addEventListener('change', () => {
+  const step = getSelectedStep();
+  if (!step) {
+    return;
+  }
+  syncStepReportField(step);
+  renderScenarioBuilder();
 });
 if (stepForeachInput) {
   bindStepField(stepForeachInput, (step, element) => {

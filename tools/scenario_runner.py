@@ -1131,6 +1131,102 @@ def apply_save(
         context["vars"][save_response_as] = response_json
 
 
+def _resolve_report_value(
+    step: dict[str, Any],
+    *,
+    response_json: Any,
+    response: requests.Response | None,
+    context: dict[str, Any],
+    final_url: str | None,
+    body_text: str | None,
+    report_spec: Any,
+) -> tuple[str, Any] | None:
+    """Return (report_name, value) or None when the step does not report."""
+    step_name = str(step.get("name") or "").strip() or "step"
+    save_as = str(step.get("save_response_as") or "").strip()
+
+    if report_spec is True:
+        name = save_as or step_name
+        if save_as and save_as in context.get("vars", {}):
+            return name, context["vars"][save_as]
+        return name, response_json if response_json is not None else body_text
+
+    if isinstance(report_spec, str):
+        name = report_spec.strip()
+        if not name:
+            return None
+        # Combined with save_response_as: a string report also stores the response.
+        if not save_as:
+            context.setdefault("vars", {})[name] = response_json
+        return name, response_json if response_json is not None else body_text
+
+    if isinstance(report_spec, dict):
+        collected: dict[str, Any] = {}
+        for var_name, source in report_spec.items():
+            key = str(var_name).strip()
+            if not key:
+                continue
+            source_name = save_source_name(source)
+            if source_name.startswith("json."):
+                collected[key] = None if response_json is None else path_get(response_json, source_name[5:], None)
+            elif source_name.startswith("headers.") and response is not None:
+                collected[key] = response.headers.get(source_name[8:])
+            elif source_name == "final_url":
+                collected[key] = final_url or (response.url if response is not None else None)
+            elif source_name == "status_code" and response is not None:
+                collected[key] = response.status_code
+            elif source_name == "body":
+                collected[key] = body_text
+            elif source_name.startswith("vars."):
+                collected[key] = path_get(context.get("vars", {}), source_name[5:], None)
+            elif source_name in (context.get("vars") or {}):
+                collected[key] = context["vars"][source_name]
+            else:
+                collected[key] = source
+        return step_name, collected
+
+    return None
+
+
+def apply_report(
+    step: dict[str, Any],
+    *,
+    response_json: Any,
+    response: requests.Response | None,
+    context: dict[str, Any],
+    final_url: str | None = None,
+    body_text: str | None = None,
+    ok: bool | None = None,
+) -> None:
+    """Append a step report entry when `report` is set on the step."""
+    if "report" not in step:
+        return
+    resolved = _resolve_report_value(
+        step,
+        response_json=response_json,
+        response=response,
+        context=context,
+        final_url=final_url,
+        body_text=body_text,
+        report_spec=step.get("report"),
+    )
+    if resolved is None:
+        return
+    name, value = resolved
+    entry: dict[str, Any] = {
+        "step": str(step.get("name") or "").strip() or "step",
+        "name": name,
+        "value": value,
+    }
+    if ok is not None:
+        entry["ok"] = bool(ok)
+    if "index" in context and context.get("index") is not None:
+        entry["index"] = context.get("index")
+    if response is not None:
+        entry["status_code"] = response.status_code
+    context.setdefault("reports", []).append(entry)
+
+
 def evaluate_expectations(
     step: dict[str, Any],
     response: requests.Response | None,
@@ -1603,6 +1699,7 @@ def _run_step_once(
 
     if method == "EXEC":
         ok, mismatch, latency_ms = run_exec_step(step, context, random_generators)
+        apply_report(step, response_json=None, response=None, context=context, ok=ok)
         return ok, mismatch, latency_ms, None, None
 
     if method == "SLEEP":
@@ -1645,6 +1742,15 @@ def _run_step_once(
             if response is not None:
                 apply_save(step, response_json, response, context, final_url=final_url, body_text=body_text)
 
+    apply_report(
+        step,
+        response_json=response_json,
+        response=response,
+        context=context,
+        final_url=final_url,
+        body_text=body_text,
+        ok=success,
+    )
     return success, mismatch, latency_ms, response_json if response is not None else (body_text or None), response
 
 
@@ -1855,21 +1961,27 @@ def run_worker(
     fail_fast: bool,
     exported_vars: dict[str, Any] | None = None,
     constants: dict[str, Any] | None = None,
+    exported_reports: list[dict[str, Any]] | None = None,
 ) -> None:
     session = requests.Session()
     context = {
         "vars": {"worker_id": worker_id},
         "env": dict(environment_values),
         "constants": dict(constants or {}),
+        "reports": [],
         "meta": {"environment": str(selected_environment or "")},
     }
 
     def capture_vars() -> None:
-        if exported_vars is None:
-            return
         with lock:
-            exported_vars.clear()
-            exported_vars.update(context.get("vars") or {})
+            if exported_vars is not None:
+                exported_vars.clear()
+                exported_vars.update(context.get("vars") or {})
+            if exported_reports is not None:
+                exported_reports.clear()
+                exported_reports.extend(
+                    item for item in (context.get("reports") or []) if isinstance(item, dict)
+                )
 
     iterations = 0
     while time.time() < run_until and (max_iterations <= 0 or iterations < max_iterations):
@@ -2090,6 +2202,7 @@ def execute_scenario(
     lock = threading.Lock()
     aggregate: dict[str, StepStats] = {}
     captured_vars: dict[str, Any] = {}
+    captured_reports: list[dict[str, Any]] = []
     started = time.time()
     run_until = started + max(duration, 1)
     worker_fail_fast = fail_fast or bool(scenario.get("fail_fast", False))
@@ -2111,6 +2224,7 @@ def execute_scenario(
                 "lock": lock,
                 "fail_fast": worker_fail_fast,
                 "exported_vars": captured_vars,
+                "exported_reports": captured_reports,
             },
             daemon=True,
         )
@@ -2147,6 +2261,7 @@ def execute_scenario(
             "success_rate": (total_success / total_count) if total_count else 0,
         },
         "vars": dict(captured_vars),
+        "reports": list(captured_reports),
     }
 
 

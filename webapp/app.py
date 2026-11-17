@@ -970,6 +970,7 @@ def _prepare_step_test(payload: dict[str, Any]) -> tuple[str, dict[str, Any], di
         "vars": {"worker_id": 1},
         "env": environment_values,
         "constants": constants,
+        "reports": [],
         "meta": {"environment": env_name},
     }
     return base_url, context, random_generators if isinstance(random_generators, dict) else {}, steps
