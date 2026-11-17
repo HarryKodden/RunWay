@@ -385,9 +385,11 @@ def _ensure_member(session: InteractiveSession) -> None:
     session.base_url = base_url
     session.random_generators = prepared.get("random_generators") or {}
     session.prepared_steps = [step for step in steps if isinstance(step, dict)]
+    constants = prepared.get("constants") if isinstance(prepared.get("constants"), dict) else {}
     session.context = {
         "vars": {},
         "env": dict(environment_values),
+        "constants": dict(constants),
         "meta": {"environment": environment_name},
     }
     while len(session.member_stats) <= session.member_index:

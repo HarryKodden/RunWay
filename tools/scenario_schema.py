@@ -19,6 +19,7 @@ SCENARIO_FIELDS = {
     "export_env",
     "selected_environment",
     "environments",
+    "constants",
     "random_generators",
     "steps",
 }
@@ -59,6 +60,7 @@ STEP_FIELDS = {
     "save_exit_code",
     "seconds",
     "dpop_nonce_retry",
+    "foreach",
 }
 
 AUTH_FIELDS = {"type", "username", "password", "token"}
@@ -124,6 +126,8 @@ def _check_scenario(document: dict[str, Any], errors: list[str]) -> None:
         _check_export_env(document["export_env"], errors)
     if "environments" in document:
         _check_environments(document["environments"], errors)
+    if "constants" in document:
+        _check_constants(document["constants"], errors)
     if "random_generators" in document:
         _check_generators(document["random_generators"], errors)
     steps = document.get("steps")
@@ -152,8 +156,30 @@ def _check_environments(value: Any, errors: list[str]) -> None:
             errors.append(f"{path} must be an object")
             continue
         for key, item in env.items():
-            if not _is_scalar(item):
-                errors.append(f"{path}.{key} must be a string, number, or boolean")
+            if not _is_json_value(item):
+                errors.append(f"{path}.{key} must be JSON (object, array, string, number, boolean, or null)")
+
+
+def _check_constants(value: Any, errors: list[str]) -> None:
+    if not isinstance(value, dict):
+        errors.append("scenario.constants must be an object")
+        return
+    for name, item in value.items():
+        path = f"scenario.constants.{name}"
+        if not str(name).strip():
+            errors.append("scenario.constants contains an empty key")
+        if not _is_json_value(item):
+            errors.append(f"{path} must be JSON (object, array, string, number, boolean, or null)")
+
+
+def _is_json_value(value: Any) -> bool:
+    if value is None or _is_scalar(value):
+        return True
+    if isinstance(value, list):
+        return all(_is_json_value(item) for item in value)
+    if isinstance(value, dict):
+        return all(isinstance(key, str) and _is_json_value(item) for key, item in value.items())
+    return False
 
 
 def _check_generators(value: Any, errors: list[str]) -> None:
@@ -248,6 +274,10 @@ def _check_step(step: Any, path: str, errors: list[str]) -> None:
         _check_string_map(step["env"], f"{path}.env", errors, scalars=True)
     if "data" in step and not _is_form_data(step["data"]):
         errors.append(f"{path}.data must be an object or a string")
+    if "foreach" in step:
+        foreach = step["foreach"]
+        if not isinstance(foreach, (str, list)):
+            errors.append(f"{path}.foreach must be a string placeholder or an array")
 
 
 def _check_auth(value: Any, path: str, errors: list[str]) -> None:

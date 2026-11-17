@@ -208,6 +208,43 @@ def test_render_template_env_vars_and_meta():
     assert render_template('{{ meta.environment : "default" }}', {"vars": {}, "env": {}, "meta": {}}, {}) == "default"
 
 
+def test_render_template_constants_nested_paths_preserve_types():
+    context = {
+        "vars": {},
+        "env": {},
+        "constants": {
+            "unime": {
+                "client_id": "3FA30B6A-AEE1-427A-8249-409736416821",
+                "redirect_uri": [
+                    "unime://callback",
+                    "https://impierce.com/auth/callback",
+                ],
+            }
+        },
+    }
+    assert render_template("{{ constants.unime.client_id }}", context, {}) == (
+        "3FA30B6A-AEE1-427A-8249-409736416821"
+    )
+    assert render_template("{{ constants.unime.redirect_uri }}", context, {}) == [
+        "unime://callback",
+        "https://impierce.com/auth/callback",
+    ]
+    body = render_template(
+        {
+            "client_id": "epi.as.dev.eduwallet.nl",
+            "redirect_uris": "{{ constants.unime.redirect_uri }}",
+        },
+        context,
+        {},
+    )
+    assert body["redirect_uris"][0] == "unime://callback"
+    assert render_template("{{ constants.missing.path }}", context, {}) == ""
+    assert (
+        render_template('id={{ constants.unime.client_id }}', context, {})
+        == "id=3FA30B6A-AEE1-427A-8249-409736416821"
+    )
+
+
 def test_render_template_uses_placeholder_defaults():
     empty = {"vars": {}, "env": {}}
     assert render_template('{{ server : "https://api.example.org" }}', empty, {}) == "https://api.example.org"

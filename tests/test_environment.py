@@ -153,6 +153,25 @@ def test_apply_collection_defaults_merges_environments_without_forcing_selection
     assert merged.get("selected_environment", "") == ""
 
 
+def test_apply_collection_defaults_merges_constants():
+    child = {
+        "constants": {"unime": {"client_id": "child"}, "wallet": {"client_id": "keep"}},
+        "steps": [],
+    }
+    collection = {
+        "constants": {
+            "unime": {
+                "client_id": "collection",
+                "redirect_uri": ["unime://callback"],
+            }
+        }
+    }
+    merged = apply_collection_defaults(child, collection)
+    assert merged["constants"]["unime"]["client_id"] == "collection"
+    assert merged["constants"]["unime"]["redirect_uri"] == ["unime://callback"]
+    assert merged["constants"]["wallet"]["client_id"] == "keep"
+
+
 def test_placeholder_default_inside_environment_values():
     expanded = expand_environment_values(
         {
@@ -197,6 +216,20 @@ def test_placeholder_default_is_overridden_when_set():
     assert missing_environment_dependencies({"token": "from-env"}, steps) == []
     mixed = [{"path": "{{ token }}"}, {"path": '{{ token : "fallback" }}'}]
     assert "token" in missing_environment_dependencies({}, mixed)
+
+
+def test_constants_placeholders_are_not_environment_dependencies():
+    steps = [
+        {
+            "method": "POST",
+            "path": "/register",
+            "json": {
+                "redirect_uris": "{{ constants.unime.redirect_uri }}",
+                "client_id": "{{ constants.unime.client_id }}",
+            },
+        }
+    ]
+    assert missing_environment_dependencies({}, steps) == []
 
 
 def test_is_collection_and_base_url_from_steps():

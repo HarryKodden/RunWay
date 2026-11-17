@@ -23,9 +23,7 @@ def test_schema_rejects_bad_environments_and_generators():
     with pytest.raises(ScenarioValidationError) as caught:
         validate_scenario_document({"steps": [], "environments": {"dev": "nope"}})
     assert any("environments.dev" in item for item in caught.value.errors)
-    with pytest.raises(ScenarioValidationError) as caught:
-        validate_scenario_document({"steps": [], "environments": {"dev": {"nested": {"x": 1}}}})
-    assert any("must be a string" in item for item in caught.value.errors)
+    validate_scenario_document({"steps": [], "environments": {"dev": {"nested": {"x": 1}, "uris": ["a"]}}})
 
     with pytest.raises(ScenarioValidationError) as caught:
         validate_scenario_document({"steps": [], "random_generators": []})
@@ -39,6 +37,25 @@ def test_schema_rejects_bad_environments_and_generators():
         )
     errors = caught.value.errors
     assert any("type" in item for item in errors)
+
+
+def test_schema_accepts_nested_constants_and_rejects_bad_shape():
+    validate_scenario_document(
+        {
+            "steps": [],
+            "constants": {
+                "unime": {
+                    "client_id": "3FA30B6A-AEE1-427A-8249-409736416821",
+                    "redirect_uri": ["unime://callback", "https://impierce.com/auth/callback"],
+                },
+                "flag": True,
+                "count": 2,
+            },
+        }
+    )
+    with pytest.raises(ScenarioValidationError) as caught:
+        validate_scenario_document({"steps": [], "constants": []})
+    assert any("constants" in item for item in caught.value.errors)
 
 
 def test_schema_rejects_bad_step_shapes():
@@ -77,6 +94,7 @@ def test_schema_accepts_rich_valid_document():
             "export_env": ["token"],
             "fail_fast": True,
             "environments": {"dev": {"server": "https://api.example.org", "n": 1, "ok": True}},
+            "constants": {"unime": {"redirect_uri": ["unime://callback"]}},
             "random_generators": {
                 "id": {"type": "uuid"},
                 "n": {"type": "int", "min": 1, "max": 3},

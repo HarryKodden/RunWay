@@ -13,6 +13,7 @@ def test_convert_placeholders_strips_prefixes_and_defaults():
     assert convert_placeholders('{{ server : "https://api.example.org" }}') == "{{server}}"
     assert convert_placeholders({"token": "{{ _.token }}"}) == {"token": "{{token}}"}
     assert convert_placeholders("/sample-path/{{ encode( vars.sample_url) }}") == "/sample-path/{{sample_url}}"
+    assert convert_placeholders("{{ constants.unime.redirect_uri }}") == "{{unime.redirect_uri}}"
 
 
 def test_collection_to_bruno_maps_scenarios_and_envs():

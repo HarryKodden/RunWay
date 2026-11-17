@@ -291,9 +291,60 @@ Use Insomnia-style placeholders in your step URLs, headers, and bodies:
 | `{{ env.token }}` | `token` key in the selected environment |
 | `{{ token }}` | `token` key in the selected environment |
 | `{{ server : "https://api.example.org" }}` | `server` from the environment, or the quoted default if unset |
+| `{{ constants.unime.redirect_uri }}` | nested value from collection/scenario `constants` |
+| `{{ item }}` / `{{ item.field }}` / `{{ index }}` | current foreach list item and 0-based index |
 | `{{ vars.some_id }}` | saved response field from a previous step |
 | `{{ random.gen_name }}` | configured random generator |
 | `{{ encode(vars.sample_url) }}` | URL-encode any placeholder value (for path segments / query parts) |
+
+### Foreach (iterate a step over a list)
+
+Set `foreach` on a step to a list from constants or the environment (or a literal array). The step runs once per item. Inside the step, use `{{ item }}`, `{{ item.field }}`, and `{{ index }}` (0-based).
+
+```json
+{
+  "name": "register_each_wallet",
+  "method": "POST",
+  "path": "/register",
+  "foreach": "{{ constants.wallets }}",
+  "json": {
+    "client_id": "{{ item.client_id }}",
+    "redirect_uris": "{{ item.redirect_uri }}"
+  },
+  "expected_status": [200, 201]
+}
+```
+
+An empty list is a no-op success. A non-list foreach value fails the step. `stop_on_failure` (default true) stops remaining items after the first failure. Curl preview shows the first item.
+
+### Constants
+
+Constants are static JSON on the collection (or scenario), edited with **Edit Collection Constants**. Use them for shared fixtures that are not environment-specific — client metadata, redirect URI lists, fixed ids.
+
+```json
+{
+  "constants": {
+    "unime": {
+      "client_id": "3FA30B6A-AEE1-427A-8249-409736416821",
+      "redirect_uri": [
+        "unime://callback",
+        "https://impierce.com/auth/callback"
+      ]
+    }
+  }
+}
+```
+
+Reference nested fields with dot paths. When the whole field value is a single placeholder, objects and arrays are injected as JSON (not stringified):
+
+```json
+{
+  "client_id": "{{ constants.unime.client_id }}",
+  "redirect_uris": "{{ constants.unime.redirect_uri }}"
+}
+```
+
+Collection constants win over scenario constants when both define the same key (same merge rule as environments). Prefer **environments** for host/credentials that change per deployment; prefer **constants** for stable shared data.
 
 #### Meta placeholders
 
@@ -498,6 +549,8 @@ The web UI can also edit a scenario as JSON. Open a scenario and choose **Edit s
 - Reuse nested object field: `{{ vars.response_obj.data.id }}`
 - URL-encode a value: `{{ encode(vars.sample_url) }}`
 - Random generator value: `{{ random.generator_name }}`
+- Constant (nested path): `{{ constants.unime.redirect_uri }}`
+- Foreach item / index: `{{ item }}`, `{{ item.client_id }}`, `{{ index }}`
 - Timestamp placeholder: `{{ meta.now }}`
 - Unix epoch placeholder: `{{ meta.unix }}`
 - Selected environment name: `{{ meta.environment }}`

@@ -94,6 +94,7 @@ def empty_collection_document(name: str, description: str = "") -> dict[str, Any
         "steps": [],
         "selected_environment": "",
         "environments": {},
+        "constants": {},
         "random_generators": {},
     }
 
@@ -394,6 +395,7 @@ def clone_library_path(db: Session, user: User, library_path: str) -> Collection
                 payload = {
                     **empty_collection_document(str(payload.get("name") or file_path.stem)),
                     "environments": payload.get("environments") or {},
+                    "constants": payload.get("constants") or {},
                     "random_generators": payload.get("random_generators") or {},
                     "selected_environment": payload.get("selected_environment") or "",
                     "scenarios": [file_path.name],
@@ -402,6 +404,7 @@ def clone_library_path(db: Session, user: User, library_path: str) -> Collection
             payload = {
                 **empty_collection_document(str(payload.get("name") or file_path.stem)),
                 "environments": payload.get("environments") or {},
+                "constants": payload.get("constants") or {},
                 "random_generators": payload.get("random_generators") or {},
                 "selected_environment": payload.get("selected_environment") or "",
                 "scenarios": [file_path.name],
@@ -531,10 +534,14 @@ def diff_collections(local: Collection, source: Collection) -> dict[str, Any]:
     source_envs = (source.document or {}).get("environments") if isinstance((source.document or {}).get("environments"), dict) else {}
     if _stable_json(local_envs) != _stable_json(source_envs):
         meta_changed.append("environments")
-    local_consts = (local.document or {}).get("random_generators") if isinstance((local.document or {}).get("random_generators"), dict) else {}
-    source_consts = (source.document or {}).get("random_generators") if isinstance((source.document or {}).get("random_generators"), dict) else {}
-    if _stable_json(local_consts) != _stable_json(source_consts):
+    local_gens = (local.document or {}).get("random_generators") if isinstance((local.document or {}).get("random_generators"), dict) else {}
+    source_gens = (source.document or {}).get("random_generators") if isinstance((source.document or {}).get("random_generators"), dict) else {}
+    if _stable_json(local_gens) != _stable_json(source_gens):
         meta_changed.append("random_generators")
+    local_consts = (local.document or {}).get("constants") if isinstance((local.document or {}).get("constants"), dict) else {}
+    source_consts = (source.document or {}).get("constants") if isinstance((source.document or {}).get("constants"), dict) else {}
+    if _stable_json(local_consts) != _stable_json(source_consts):
+        meta_changed.append("constants")
 
     return {
         "local_id": local.id,
@@ -716,6 +723,7 @@ def workspace_parent_collection(
         "description": collection.description or "",
         "selected_environment": collection.selected_environment or "",
         "environments": document.get("environments") if isinstance(document.get("environments"), dict) else {},
+        "constants": document.get("constants") if isinstance(document.get("constants"), dict) else {},
         "random_generators": document.get("random_generators") if isinstance(document.get("random_generators"), dict) else {},
         "scenarios": document.get("scenarios") if isinstance(document.get("scenarios"), list) else [],
     }

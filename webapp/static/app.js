@@ -47,6 +47,7 @@ const stepPathResolved = document.getElementById('step-path-resolved');
 const stepTimeoutInput = document.getElementById('step-timeout');
 const stepExpectedStatusInput = document.getElementById('step-expected-status');
 const stepSaveResponseAsInput = document.getElementById('step-save-response-as');
+const stepForeachInput = document.getElementById('step-foreach');
 const editStepHeadersJsonButton = document.getElementById('edit-step-headers-json');
 const editStepJsonButton = document.getElementById('edit-step-json');
 const editStepSaveJsonButton = document.getElementById('edit-step-save-json');
@@ -691,6 +692,7 @@ function createEmptyScenario() {
     base_url: '',
     environments: {},
     selected_environment: '',
+    constants: {},
     random_generators: {},
     steps: [],
   };
@@ -718,6 +720,9 @@ function normalizeScenario(scenario) {
     ...scenario,
     environments: normalizedEnvironments,
     selected_environment: selectedEnvironment,
+    constants: scenario?.constants && typeof scenario.constants === 'object' && !Array.isArray(scenario.constants)
+      ? scenario.constants
+      : {},
     random_generators: scenario?.random_generators || {},
     steps: Array.isArray(scenario?.steps) ? scenario.steps : [],
   };
@@ -954,7 +959,7 @@ function unwrapEncodeCall(raw) {
 function envPlaceholderPath(token) {
   const {inner} = unwrapEncodeCall(token);
   const {name} = parsePlaceholderToken(inner);
-  if (!name || name.startsWith('vars.') || name.startsWith('random.') || name.startsWith('meta.') || name.startsWith('json.') || name.startsWith('headers.') || name.startsWith('url_query.') || name.startsWith('location_query.')) {
+  if (!name || name === 'item' || name.startsWith('item.') || name === 'index' || name.startsWith('vars.') || name.startsWith('random.') || name.startsWith('constants.') || name.startsWith('meta.') || name.startsWith('json.') || name.startsWith('headers.') || name.startsWith('url_query.') || name.startsWith('location_query.')) {
     return null;
   }
   if (name.startsWith('env.')) {
@@ -964,6 +969,18 @@ function envPlaceholderPath(token) {
     return name.slice(2);
   }
   return name;
+}
+
+function getMergedConstants() {
+  const collectionConsts = activeCollectionDocument?.constants;
+  const scenarioConsts = currentScenario?.constants;
+  const higher = collectionConsts && typeof collectionConsts === 'object' && !Array.isArray(collectionConsts)
+    ? collectionConsts
+    : {};
+  const lower = scenarioConsts && typeof scenarioConsts === 'object' && !Array.isArray(scenarioConsts)
+    ? scenarioConsts
+    : {};
+  return mergeDefined(higher, lower);
 }
 
 function placeholderDefault(token) {
@@ -1908,6 +1925,15 @@ function expandEnvPlaceholders(value) {
         return maybeEncode(envName);
       }
       return defaultValue != null ? maybeEncode(defaultValue) : match;
+    } else if (name.startsWith('constants.')) {
+      const resolvedConst = lookupEnvPath(getMergedConstants(), name.slice(10));
+      if (resolvedConst == null || resolvedConst === '') {
+        return defaultValue != null ? maybeEncode(defaultValue) : match;
+      }
+      if (typeof resolvedConst === 'object') {
+        return maybeEncode(JSON.stringify(resolvedConst));
+      }
+      return maybeEncode(String(resolvedConst));
     } else if (name.startsWith('vars.') || name.startsWith('random.') || name.startsWith('meta.') || name.startsWith('json.') || name.startsWith('headers.') || name.startsWith('url_query.') || name.startsWith('location_query.')) {
       return defaultValue != null ? maybeEncode(defaultValue) : match;
     }
@@ -2138,12 +2164,18 @@ function getValidatedScenarioPayload() {
   if (payload.environments != null && (typeof payload.environments !== 'object' || Array.isArray(payload.environments))) {
     throw new Error('Scenario JSON is invalid: environments must be a JSON object.');
   }
+  if (payload.constants != null && (typeof payload.constants !== 'object' || Array.isArray(payload.constants))) {
+    throw new Error('Scenario JSON is invalid: constants must be a JSON object.');
+  }
   if (payload.random_generators != null && (typeof payload.random_generators !== 'object' || Array.isArray(payload.random_generators))) {
     throw new Error('Scenario JSON is invalid: random_generators must be a JSON object.');
   }
   if (!collectionFile) {
     if (!payload.environments || Object.keys(payload.environments).length === 0) {
       delete payload.environments;
+    }
+    if (!payload.constants || Object.keys(payload.constants).length === 0) {
+      delete payload.constants;
     }
     if (!payload.random_generators || Object.keys(payload.random_generators).length === 0) {
       delete payload.random_generators;
@@ -2386,6 +2418,11 @@ function renderStepDetail() {
   stepTimeoutInput.value = step.timeout ?? '';
   stepExpectedStatusInput.value = formatExpectedStatus(step.expected_status);
   stepSaveResponseAsInput.value = step.save_response_as || '';
+  if (stepForeachInput) {
+    stepForeachInput.value = typeof step.foreach === 'string'
+      ? step.foreach
+      : (Array.isArray(step.foreach) ? JSON.stringify(step.foreach) : '');
+  }
   syncJsonFieldButton(editStepHeadersJsonButton, step.headers);
   syncJsonFieldButton(editStepJsonButton, step.json !== undefined ? step.json : step.data);
   syncJsonFieldButton(editStepSaveJsonButton, step.save);
@@ -2440,23 +2477,23 @@ function getJsonDialogConfig(target) {
       },
     };
   }
-  if (target === 'random_generators') {
+  if (target === 'constants') {
     const editingCollection = Boolean(isCollectionDocument(currentScenario) || activeCollectionDocument);
     return {
       title: editingCollection ? 'Edit Collection Constants JSON' : 'Edit Constants JSON',
       fieldName: 'Constants',
       currentValue: () => {
         if (isCollectionDocument(currentScenario) || !activeCollectionDocument) {
-          return currentScenario?.random_generators || {};
+          return currentScenario?.constants || {};
         }
-        return activeCollectionDocument.random_generators || {};
+        return activeCollectionDocument.constants || {};
       },
       apply: (parsed) => {
         const next = parsed || {};
         if (isCollectionDocument(currentScenario) || !activeCollectionDocument) {
-          currentScenario.random_generators = next;
+          currentScenario.constants = next;
         } else {
-          activeCollectionDocument.random_generators = next;
+          activeCollectionDocument.constants = next;
         }
       },
     };
@@ -2667,6 +2704,7 @@ async function persistActiveCollectionDocument() {
     return;
   }
   collection.environments = activeCollectionDocument.environments || {};
+  collection.constants = activeCollectionDocument.constants || {};
   collection.random_generators = activeCollectionDocument.random_generators || {};
   if (activeCollectionDocument.selected_environment) {
     collection.selected_environment = activeCollectionDocument.selected_environment;
@@ -2723,7 +2761,7 @@ async function saveJsonDialog() {
       await validateScenarioDocument(parsed);
     }
     config.apply(parsed);
-    if (currentJsonDialogTarget === 'environments' || currentJsonDialogTarget === 'random_generators') {
+    if (currentJsonDialogTarget === 'environments' || currentJsonDialogTarget === 'constants') {
       await persistActiveCollectionDocument();
     }
     await saveScenarioIfNamed();
@@ -3033,6 +3071,7 @@ function captureActiveCollectionDocument(scenario, path = selectedScenarioName |
   activeCollectionDocument = {
     name: scenario.name || '',
     environments: scenario.environments || {},
+    constants: scenario.constants || {},
     random_generators: scenario.random_generators || {},
     selected_environment: scenario.selected_environment || '',
     base_url: scenario.base_url || '',
@@ -3301,6 +3340,7 @@ async function openScenario(item, options = {}) {
         activeCollectionMembers = Array.isArray(inherited.scenarios) ? inherited.scenarios : [];
         activeCollectionDocument = {
           environments: inherited.environments || {},
+          constants: inherited.constants || {},
           random_generators: inherited.random_generators || {},
           selected_environment: inherited.selected_environment || '',
           base_url: inherited.base_url || '',
@@ -5488,7 +5528,7 @@ scenarioEnvironmentSelect.addEventListener('change', () => {
 });
 
 
-editRandomGeneratorsJsonButton.addEventListener('click', () => openJsonDialog('random_generators'));
+editRandomGeneratorsJsonButton.addEventListener('click', () => openJsonDialog('constants'));
 editEnvironmentsJsonButton.addEventListener('click', () => openJsonDialog('environments'));
 editScenarioJsonButton?.addEventListener('click', () => openJsonDialog('scenario'));
 jsonDialogEditor?.addEventListener('input', () => clearJsonDialogError());
@@ -5562,6 +5602,27 @@ bindStepField(stepSaveResponseAsInput, (step, element) => {
   }
   step.save_response_as = element.value.trim();
 });
+if (stepForeachInput) {
+  bindStepField(stepForeachInput, (step, element) => {
+    const raw = element.value.trim();
+    if (!raw) {
+      delete step.foreach;
+      return;
+    }
+    if (raw.startsWith('[')) {
+      try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          step.foreach = parsed;
+          return;
+        }
+      } catch {
+        // Keep as placeholder/string when JSON is incomplete while typing.
+      }
+    }
+    step.foreach = raw;
+  });
+}
 stepFollowRedirectsInput?.addEventListener('change', () => {
   const step = getSelectedStep();
   if (!step) {

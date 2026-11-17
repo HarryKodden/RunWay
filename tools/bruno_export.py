@@ -15,7 +15,7 @@ from urllib.parse import parse_qsl, urlsplit
 
 _UID_ALPHABET = "useandom26T198340PX75pxJACKVERYMINDBUSHWOLFGQZbfghjklqvwyzrict"
 _PLACEHOLDER_RE = re.compile(r"\{\{([^{}]+)\}\}")
-_PREFIXES = ("env.", "_.", "vars.", "random.", "meta.")
+_PREFIXES = ("env.", "_.", "vars.", "random.", "constants.", "meta.")
 
 
 def bruno_uid(length: int = 21) -> str:

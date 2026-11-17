@@ -383,6 +383,7 @@ def parent_collection(path: str = Query(..., min_length=1)) -> JSONResponse:
         "description": collection.get("description") or "",
         "selected_environment": collection.get("selected_environment") or "",
         "environments": collection.get("environments") if isinstance(collection.get("environments"), dict) else {},
+        "constants": collection.get("constants") if isinstance(collection.get("constants"), dict) else {},
         "random_generators": collection.get("random_generators") if isinstance(collection.get("random_generators"), dict) else {},
         "scenarios": collection.get("scenarios") if isinstance(collection.get("scenarios"), list) else [],
     })
@@ -939,6 +940,7 @@ def _prepare_step_test(payload: dict[str, Any]) -> tuple[str, dict[str, Any], di
         or environment_name_as_base_url(env_name)
     )
     random_generators = scenario.get("random_generators", {})
+    constants = scenario.get("constants", {}) if isinstance(scenario.get("constants"), dict) else {}
     environment_values = _resolve_scenario_environment_values(scenario, selected_environment)
     overrides = payload.get("environment_overrides")
     if isinstance(environment_values, dict):
@@ -967,6 +969,7 @@ def _prepare_step_test(payload: dict[str, Any]) -> tuple[str, dict[str, Any], di
     context = {
         "vars": {"worker_id": 1},
         "env": environment_values,
+        "constants": constants,
         "meta": {"environment": env_name},
     }
     return base_url, context, random_generators if isinstance(random_generators, dict) else {}, steps

@@ -523,6 +523,17 @@ def resolve_named_token(token: str, context: dict[str, Any], random_generators: 
         return path_get(context.get("env", {}), token[4:], "")
     if token.startswith("_."):
         return path_get(context.get("env", {}), token[2:], "")
+    if token.startswith("constants."):
+        return path_get(context.get("constants", {}), token[10:], "")
+    if token == "item":
+        return "" if "item" not in context or context.get("item") is None else context.get("item")
+    if token.startswith("item."):
+        item = context.get("item")
+        if isinstance(item, (dict, list)):
+            return path_get(item, token[5:], "")
+        return ""
+    if token == "index":
+        return "" if "index" not in context or context.get("index") is None else context.get("index")
     if token.startswith("random."):
         generator_config = random_generators.get(token[7:])
         if generator_config is None:
@@ -648,7 +659,11 @@ def resolve_environment_values(scenario: dict[str, Any], selected_environment: s
 def _environment_ref_path(token: str) -> str | None:
     _encoded, inner = unwrap_encode_call(token)
     name, _default = parse_placeholder_token(inner)
-    if name.startswith(("vars.", "random.", "meta.", "json.", "headers.", "url_query.", "location_query.")):
+    if name.startswith(
+        ("vars.", "random.", "constants.", "meta.", "json.", "headers.", "url_query.", "location_query.")
+    ):
+        return None
+    if name == "item" or name.startswith("item.") or name == "index":
         return None
     if name.startswith("env."):
         return name[4:]
@@ -1543,7 +1558,23 @@ def run_exec_step(step: dict[str, Any], context: dict[str, Any], random_generato
         return False, True, latency_ms
 
 
-def run_step(
+def resolve_foreach_items(
+    step: dict[str, Any],
+    context: dict[str, Any],
+    random_generators: dict[str, Any],
+) -> list[Any] | None:
+    """Return the list to iterate, or None when the step has no foreach."""
+    if "foreach" not in step:
+        return None
+    rendered = render_template(step.get("foreach"), context, random_generators)
+    if isinstance(rendered, list):
+        return rendered
+    if rendered is None or rendered == "":
+        return []
+    raise ValueError(f"foreach must resolve to a list, got {type(rendered).__name__}")
+
+
+def _run_step_once(
     session: requests.Session,
     step: dict[str, Any],
     base_url: str,
@@ -1554,20 +1585,11 @@ def run_step(
     if method == "USER_AUTH":
         return False, False, 0.0, USER_AUTH_CLI_MESSAGE, None
 
-    def _normalize_prepare(raw: Any) -> list[dict[str, Any]]:
-        if raw is None:
-            return []
-        if isinstance(raw, dict):
-            return [raw]
-        if isinstance(raw, list):
-            return [item for item in raw if isinstance(item, dict)]
-        return []
-
     if method == "PREPARE":
         started = time.perf_counter()
         try:
             raw = step.get("prepare") if "prepare" in step else step.get("action")
-            for item in _normalize_prepare(raw):
+            for item in normalize_prepare(raw):
                 run_prepare(item, context, random_generators, base_url)
             latency_ms = (time.perf_counter() - started) * 1000
             return True, False, latency_ms, None, None
@@ -1576,7 +1598,7 @@ def run_step(
             return False, True, latency_ms, str(exc), None
 
     # Optional inline prepares before HTTP/EXEC/POLL steps (prepare key only)
-    for item in _normalize_prepare(step.get("prepare")):
+    for item in normalize_prepare(step.get("prepare")):
         run_prepare(item, context, random_generators, base_url)
 
     if method == "EXEC":
@@ -1626,6 +1648,70 @@ def run_step(
     return success, mismatch, latency_ms, response_json if response is not None else (body_text or None), response
 
 
+def run_step(
+    session: requests.Session,
+    step: dict[str, Any],
+    base_url: str,
+    context: dict[str, Any],
+    random_generators: dict[str, Any],
+) -> tuple[bool, bool, float, Any, requests.Response | None]:
+    try:
+        items = resolve_foreach_items(step, context, random_generators)
+    except ValueError as exc:
+        return False, True, 0.0, str(exc), None
+
+    if items is None:
+        return _run_step_once(session, step, base_url, context, random_generators)
+
+    had_item = "item" in context
+    had_index = "index" in context
+    previous_item = context.get("item")
+    previous_index = context.get("index")
+    all_success = True
+    any_mismatch = False
+    total_latency = 0.0
+    last_payload: Any = None
+    last_response: requests.Response | None = None
+    try:
+        if not items:
+            return True, False, 0.0, None, None
+        for index, item in enumerate(items):
+            context["item"] = item
+            context["index"] = index
+            success, mismatch, latency_ms, payload, response = _run_step_once(
+                session, step, base_url, context, random_generators
+            )
+            total_latency += latency_ms
+            last_payload = payload
+            last_response = response
+            if mismatch:
+                any_mismatch = True
+            if not success:
+                all_success = False
+                if isinstance(payload, str) and payload:
+                    last_payload = f"foreach[{index}]: {payload}"
+                elif response is not None:
+                    snippet = " ".join((response.text or "").split())[:240]
+                    detail = f"HTTP {response.status_code}"
+                    if snippet:
+                        detail = f"{detail}: {snippet}"
+                    last_payload = f"foreach[{index}]: {detail}"
+                else:
+                    last_payload = f"foreach[{index}]: step failed"
+                if step.get("stop_on_failure", True) is not False:
+                    break
+        return all_success, any_mismatch, total_latency, last_payload, last_response
+    finally:
+        if had_item:
+            context["item"] = previous_item
+        else:
+            context.pop("item", None)
+        if had_index:
+            context["index"] = previous_index
+        else:
+            context.pop("index", None)
+
+
 def preview_step_request(
     steps: list[dict[str, Any]],
     step_index: int,
@@ -1662,6 +1748,22 @@ def preview_step_request(
 
     for item in normalize_prepare(step.get("prepare")):
         run_prepare(item, context, random_generators, base_url)
+
+    foreach_items: list[Any] | None = None
+    foreach_note = ""
+    try:
+        foreach_items = resolve_foreach_items(step, context, random_generators)
+    except ValueError as exc:
+        foreach_note = f"# foreach error: {exc}"
+    if foreach_items is not None:
+        if foreach_items:
+            context["item"] = foreach_items[0]
+            context["index"] = 0
+            foreach_note = f"# foreach: previewing item 0 of {len(foreach_items)}"
+        else:
+            context["item"] = None
+            context["index"] = 0
+            foreach_note = "# foreach: empty list"
 
     method = str(step.get("method", "GET")).upper()
     timeout = step.get("timeout")
@@ -1724,6 +1826,9 @@ def preview_step_request(
             insecure=insecure,
         )
 
+    if foreach_note:
+        curl = f"{foreach_note}\n{curl}"
+
     return {
         "curl": curl,
         "request": request,
@@ -1732,6 +1837,7 @@ def preview_step_request(
         "context": {"vars": dict(context.get("vars") or {})},
         "base_url": base_url,
         "step_name": step.get("name") or f"step_{step_index + 1}",
+        "foreach_count": len(foreach_items) if foreach_items is not None else None,
     }
 
 
@@ -1748,11 +1854,13 @@ def run_worker(
     lock: threading.Lock,
     fail_fast: bool,
     exported_vars: dict[str, Any] | None = None,
+    constants: dict[str, Any] | None = None,
 ) -> None:
     session = requests.Session()
     context = {
         "vars": {"worker_id": worker_id},
         "env": dict(environment_values),
+        "constants": dict(constants or {}),
         "meta": {"environment": str(selected_environment or "")},
     }
 
@@ -1865,10 +1973,14 @@ def apply_collection_defaults(child: dict[str, Any], collection: dict[str, Any] 
             lower = child_envs.get(name) if isinstance(child_envs.get(name), dict) else {}
             merged_envs[name] = merge_defined(higher, lower)
         merged["environments"] = merged_envs
-    collection_consts = collection.get("random_generators") if isinstance(collection.get("random_generators"), dict) else {}
-    child_consts = child.get("random_generators") if isinstance(child.get("random_generators"), dict) else {}
+    collection_gens = collection.get("random_generators") if isinstance(collection.get("random_generators"), dict) else {}
+    child_gens = child.get("random_generators") if isinstance(child.get("random_generators"), dict) else {}
+    if collection_gens or child_gens:
+        merged["random_generators"] = merge_defined(collection_gens, child_gens)
+    collection_consts = collection.get("constants") if isinstance(collection.get("constants"), dict) else {}
+    child_consts = child.get("constants") if isinstance(child.get("constants"), dict) else {}
     if collection_consts or child_consts:
-        merged["random_generators"] = merge_defined(collection_consts, child_consts)
+        merged["constants"] = merge_defined(collection_consts, child_consts)
     if _is_set(collection.get("selected_environment")):
         merged["selected_environment"] = collection.get("selected_environment")
     if _is_set(collection.get("base_url")):
@@ -1949,6 +2061,7 @@ def execute_scenario(
         raise SystemExit("Scenario has no steps")
 
     random_generators = scenario.get("random_generators", {})
+    constants = scenario.get("constants", {}) if isinstance(scenario.get("constants"), dict) else {}
     environment_values = resolve_environment_values(scenario, environment)
     selected_environment_name = str(
         environment or scenario.get("selected_environment") or ""
@@ -1990,6 +2103,7 @@ def execute_scenario(
                 "steps": steps,
                 "random_generators": random_generators,
                 "environment_values": environment_values,
+                "constants": constants,
                 "selected_environment": selected_environment_name,
                 "run_until": run_until,
                 "max_iterations": iterations,
