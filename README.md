@@ -321,7 +321,13 @@ Mark steps whose responses should appear in the Results **Output** dialog after 
 | `{ "client_id": "{{ json.client_id }}", "status": "status_code" }` | Include a small object built from response/vars sources |
 | `false` | Opt out (useful when you only want `save_response_as` for chaining) |
 
-`save_response_as` alone also feeds the Output dialog (same as `"report": true`). The Results table shows **Scenario / Result / Output**; **Output** opens the collected items (including foreach iterations).
+`save_response_as` alone also feeds the Output dialog (same as `"report": true`).
+
+Results table:
+- Collection run: **Scenario / Result / Output** — Output lists every reported step in that scenario
+- Single scenario: **Step / Result / Output** — each step has its own Output button
+
+Foreach iterations appear as separate items under that step.
 
 ### Foreach (iterate a step over a list)
 

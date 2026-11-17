@@ -4613,29 +4613,35 @@ function outputKeyFor(name, index) {
 
 function formatReportsForDialog(reports, title) {
   if (!Array.isArray(reports) || reports.length === 0) {
-    return 'No reported output for this scenario.';
+    return 'No reported output.';
   }
   const blocks = reports.map((entry, index) => {
-    const label = entry?.name || entry?.step || `item_${index + 1}`;
+    const stepLabel = entry?.step || `step_${index + 1}`;
+    const nameLabel = entry?.name && entry.name !== stepLabel ? entry.name : '';
     const meta = [];
-    if (entry?.step && entry.step !== label) meta.push(`step=${entry.step}`);
+    if (nameLabel) meta.push(`report=${nameLabel}`);
     if (entry?.index != null) meta.push(`index=${entry.index}`);
     if (entry?.status_code != null) meta.push(`status=${entry.status_code}`);
     if (entry?.ok === true) meta.push('ok');
     if (entry?.ok === false) meta.push('failed');
-    const header = meta.length ? `# ${label} (${meta.join(', ')})` : `# ${label}`;
+    const titleLine = meta.length
+      ? `## ${index + 1}. ${stepLabel} (${meta.join(', ')})`
+      : `## ${index + 1}. ${stepLabel}`;
     const value = entry?.value;
     const body = typeof value === 'string' ? value : JSON.stringify(value ?? null, null, 2);
-    return `${header}\n${body}`;
+    return `${titleLine}\n${body}`;
   });
-  return `${title ? `${title}\n\n` : ''}${blocks.join('\n\n')}`;
+  const heading = title ? `# ${title}\n# ${reports.length} item${reports.length === 1 ? '' : 's'}\n` : '';
+  return `${heading}\n${blocks.join('\n\n----------\n\n')}`;
 }
 
 function passFailRows(items) {
   return items.map((item) => {
     const ok = item.ok;
+    const entry = item.outputKey ? lastRunOutputByKey.get(item.outputKey) : null;
+    const count = Array.isArray(entry?.reports) ? entry.reports.length : 0;
     const outputCell = item.outputKey
-      ? `<button type="button" class="ghost output-open-btn" data-output-key="${escapeHtml(item.outputKey)}">Output</button>`
+      ? `<button type="button" class="ghost output-open-btn" data-output-key="${encodeURIComponent(item.outputKey)}">${count ? `Output (${count})` : 'Output'}</button>`
       : '<span class="muted">—</span>';
     return `<tr class="${ok ? 'row-pass' : 'row-fail'}">
       <td>${escapeHtml(item.name || '')}</td>
@@ -4670,19 +4676,17 @@ function renderPassFailList(summary) {
   if (!steps.length) {
     return '<p class="muted">No steps in this run.</p>';
   }
-  const scenarioName = scenario.name || 'scenario';
-  const key = outputKeyFor(scenarioName, 0);
-  const rows = passFailRows([{
-    name: scenarioName,
-    ok: scenarioTotalsPassed(scenario.totals) || (
-      (scenario.totals?.failure || 0) === 0
-      && (scenario.totals?.expected_mismatch || 0) === 0
-      && steps.every((step) => (step.failure || 0) === 0 && (step.expected_mismatch || 0) === 0)
-    ),
-    outputKey: key,
-  }]);
+  // One row per step so each reported step has its own Output button.
+  const rows = passFailRows(steps.map((step, index) => {
+    const name = step.name || `step_${index + 1}`;
+    return {
+      name,
+      ok: (step.failure || 0) === 0 && (step.expected_mismatch || 0) === 0,
+      outputKey: outputKeyFor(name, index),
+    };
+  }));
   return `<table class="results-table">
-    <thead><tr><th>Scenario</th><th>Result</th><th>Output</th></tr></thead>
+    <thead><tr><th>Step</th><th>Result</th><th>Output</th></tr></thead>
     <tbody>${rows}</tbody>
   </table>`;
 }
@@ -4719,6 +4723,16 @@ function reportsFromScenarioResult(result) {
   }));
 }
 
+function reportsForStep(reports, stepName) {
+  const wanted = String(stepName || '');
+  const matched = (reports || []).filter((entry) => String(entry?.step || '') === wanted);
+  if (matched.length) {
+    return matched;
+  }
+  // Fallback when report entries were keyed by save_response_as name only.
+  return (reports || []).filter((entry) => String(entry?.name || '') === wanted);
+}
+
 function rememberRunOutputs(summary) {
   lastRunOutputByKey = new Map();
   const scenario = summary?.scenario;
@@ -4739,14 +4753,18 @@ function rememberRunOutputs(summary) {
     });
     return;
   }
-  const name = scenario.name || 'scenario';
-  lastRunOutputByKey.set(
-    outputKeyFor(name, 0),
-    {
-      title: name,
-      reports: reportsFromScenarioResult(scenario),
-    },
-  );
+  const allReports = reportsFromScenarioResult(scenario);
+  const steps = Array.isArray(scenario.steps) ? scenario.steps : [];
+  steps.forEach((step, index) => {
+    const name = step.name || `step_${index + 1}`;
+    lastRunOutputByKey.set(
+      outputKeyFor(name, index),
+      {
+        title: name,
+        reports: reportsForStep(allReports, name),
+      },
+    );
+  });
 }
 
 function openOutputDialog(outputKey) {
@@ -4755,13 +4773,13 @@ function openOutputDialog(outputKey) {
     return;
   }
   if (outputDialogTitle) {
-    outputDialogTitle.textContent = entry.title || 'Scenario output';
+    outputDialogTitle.textContent = entry.title || 'Output';
   }
   if (outputDialogHelp) {
     const count = Array.isArray(entry.reports) ? entry.reports.length : 0;
     outputDialogHelp.textContent = count
-      ? `${count} reported item${count === 1 ? '' : 's'} from this scenario`
-      : 'No reported output for this scenario';
+      ? `${count} reported item${count === 1 ? '' : 's'}`
+      : 'No reported output for this step';
   }
   outputDialogBody.textContent = formatReportsForDialog(entry.reports, entry.title);
   outputDialog.classList.remove('hidden');
@@ -5688,7 +5706,13 @@ reportText?.addEventListener('click', (event) => {
   if (!button) {
     return;
   }
-  openOutputDialog(button.getAttribute('data-output-key') || '');
+  let key = button.getAttribute('data-output-key') || '';
+  try {
+    key = decodeURIComponent(key);
+  } catch {
+    // Keep raw key when it was not encoded.
+  }
+  openOutputDialog(key);
 });
 outputDialogClose?.addEventListener('click', closeOutputDialog);
 outputDialogCloseTop?.addEventListener('click', closeOutputDialog);
