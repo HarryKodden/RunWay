@@ -2428,13 +2428,14 @@ function renderStepDetail() {
   stepTimeoutInput.value = step.timeout ?? '';
   stepExpectedStatusInput.value = formatExpectedStatus(step.expected_status);
   stepSaveResponseAsInput.value = step.save_response_as || '';
-  if (stepReportAsInput) {
-    stepReportAsInput.value = typeof step.report === 'string' ? step.report : '';
-  }
   if (stepReportInput) {
     // Absent report → included by default in the runner; only false opts out.
     stepReportInput.checked = step.report !== false;
-    stepReportInput.disabled = Boolean(typeof step.report === 'object' && step.report && !Array.isArray(step.report));
+    stepReportInput.disabled = false;
+  }
+  if (stepReportAsInput) {
+    stepReportAsInput.value = formatReportAsInput(step.report);
+    stepReportAsInput.disabled = step.report === false;
   }
   if (stepForeachInput) {
     stepForeachInput.value = typeof step.foreach === 'string'
@@ -5794,27 +5795,73 @@ bindStepField(stepSaveResponseAsInput, (step, element) => {
   }
   step.save_response_as = element.value.trim();
 });
+function formatReportAsInput(report) {
+  if (report === true || report === false || report == null) {
+    return '';
+  }
+  if (typeof report === 'string') {
+    return report;
+  }
+  if (Array.isArray(report)) {
+    return report.map((item) => String(item || '').trim()).filter(Boolean).join(', ');
+  }
+  if (typeof report === 'object') {
+    const keys = Object.keys(report);
+    const simple = keys.every((key) => {
+      const raw = String(report[key] ?? '').trim();
+      const normalized = raw.replace(/^\{\{\s*/, '').replace(/\s*\}\}$/, '').trim();
+      return normalized === key || normalized === `json.${key}` || raw === key;
+    });
+    if (simple) {
+      return keys.join(', ');
+    }
+    return JSON.stringify(report);
+  }
+  return '';
+}
+
+function parseReportAsInput(raw) {
+  const text = String(raw || '').trim();
+  if (!text) {
+    return null;
+  }
+  if (text.startsWith('{') || text.startsWith('[')) {
+    return JSON.parse(text);
+  }
+  const fields = text.split(',').map((part) => part.trim()).filter(Boolean);
+  return fields.length ? fields : null;
+}
+
 function syncStepReportField(step) {
   if (!step) {
     return;
   }
-  if (typeof step.report === 'object' && step.report && !Array.isArray(step.report)) {
-    return;
-  }
-  const named = String(stepReportAsInput?.value || '').trim();
-  if (named) {
-    step.report = named;
-    if (stepReportInput) {
-      stepReportInput.checked = true;
+  if (!stepReportInput?.checked) {
+    step.report = false;
+    if (stepReportAsInput) {
+      stepReportAsInput.disabled = true;
     }
     return;
   }
-  if (stepReportInput?.checked) {
-    // Default-on: omit the key so JSON stays clean; runner still reports.
+  if (stepReportAsInput) {
+    stepReportAsInput.disabled = false;
+  }
+  const raw = String(stepReportAsInput?.value || '').trim();
+  if (!raw) {
+    // Default-on: omit the key so JSON stays clean; runner still reports full body.
     delete step.report;
     return;
   }
-  step.report = false;
+  try {
+    const parsed = parseReportAsInput(raw);
+    if (parsed == null) {
+      delete step.report;
+      return;
+    }
+    step.report = parsed;
+  } catch (error) {
+    step.report = raw;
+  }
 }
 if (stepReportAsInput) {
   bindStepField(stepReportAsInput, (step) => {
@@ -5825,6 +5872,9 @@ stepReportInput?.addEventListener('change', () => {
   const step = getSelectedStep();
   if (!step) {
     return;
+  }
+  if (stepReportInput.checked && stepReportAsInput && step.report === false) {
+    stepReportAsInput.value = '';
   }
   syncStepReportField(step);
   renderScenarioBuilder();

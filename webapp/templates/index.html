@@ -233,13 +233,13 @@
                       <input id="step-expected-status" placeholder="200 or 200,201,204" />
                     </label>
                     <label>Save Response As <input id="step-save-response-as" placeholder="response_obj" /></label>
-                    <label>Report as
-                      <input id="step-report-as" placeholder="registration (or leave blank)" />
-                      <span class="muted">Optional Output label (also saves the response under that name).</span>
-                    </label>
                     <label class="toggle-row">
                       <input id="step-report" type="checkbox" checked />
                       <span>Include response in run Output</span>
+                    </label>
+                    <label>Report as
+                      <input id="step-report-as" placeholder="client_id, client_secret" />
+                      <span class="muted">Optional: only these response fields in Output (comma-separated). Blank = full body.</span>
                     </label>
                     <label>Foreach
                       <input id="step-foreach" placeholder="{% raw %}{{ constants.wallets }} or {{ env.uris }}{% endraw %}" />

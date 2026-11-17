@@ -1156,6 +1156,82 @@ def apply_save(
         context["vars"][save_response_as] = response_json
 
 
+def _report_entry_name(step: dict[str, Any]) -> str:
+    save_as = str(step.get("save_response_as") or "").strip()
+    step_name = str(step.get("name") or "").strip() or "step"
+    return save_as or step_name
+
+
+def _collect_report_source(
+    source: Any,
+    *,
+    response_json: Any,
+    response: requests.Response | None,
+    context: dict[str, Any],
+    final_url: str | None,
+    body_text: str | None,
+) -> Any:
+    source_name = save_source_name(source)
+    if source_name.startswith("json."):
+        return None if response_json is None else path_get(response_json, source_name[5:], None)
+    if source_name.startswith("headers.") and response is not None:
+        return response.headers.get(source_name[8:])
+    if source_name == "final_url":
+        return final_url or (response.url if response is not None else None)
+    if source_name == "status_code" and response is not None:
+        return response.status_code
+    if source_name == "body":
+        return body_text
+    if source_name.startswith("vars."):
+        return path_get(context.get("vars", {}), source_name[5:], None)
+    if source_name in (context.get("vars") or {}):
+        return context["vars"][source_name]
+    # Bare response field path (e.g. client_id or nested.token).
+    if isinstance(response_json, (dict, list)):
+        return path_get(response_json, source_name, None)
+    return None
+
+
+def _report_field_key(field: str) -> tuple[str, str]:
+    """Return (output_key, source) for a Report-as field name."""
+    source_name = save_source_name(field)
+    if source_name.startswith("json."):
+        return source_name[5:], source_name
+    if source_name.startswith("headers."):
+        return source_name[len("headers.") :], source_name
+    if source_name.startswith("vars."):
+        return source_name[len("vars.") :], source_name
+    return source_name, source_name
+
+
+def _project_report_fields(
+    fields: list[str],
+    *,
+    response_json: Any,
+    response: requests.Response | None,
+    context: dict[str, Any],
+    final_url: str | None,
+    body_text: str | None,
+) -> dict[str, Any]:
+    collected: dict[str, Any] = {}
+    for raw in fields:
+        field = str(raw).strip()
+        if not field:
+            continue
+        key, source = _report_field_key(field)
+        if not key:
+            continue
+        collected[key] = _collect_report_source(
+            source,
+            response_json=response_json,
+            response=response,
+            context=context,
+            final_url=final_url,
+            body_text=body_text,
+        )
+    return collected
+
+
 def _resolve_report_value(
     step: dict[str, Any],
     *,
@@ -1167,23 +1243,39 @@ def _resolve_report_value(
     report_spec: Any,
 ) -> tuple[str, Any] | None:
     """Return (report_name, value) or None when the step does not report."""
-    step_name = str(step.get("name") or "").strip() or "step"
+    name = _report_entry_name(step)
     save_as = str(step.get("save_response_as") or "").strip()
 
     if report_spec is True:
-        name = save_as or step_name
         if save_as and save_as in context.get("vars", {}):
             return name, context["vars"][save_as]
         return name, response_json if response_json is not None else body_text
 
     if isinstance(report_spec, str):
-        name = report_spec.strip()
-        if not name:
+        fields = [part.strip() for part in report_spec.split(",") if part.strip()]
+        if not fields:
             return None
-        # Combined with save_response_as: a string report also stores the response.
-        if not save_as:
-            context.setdefault("vars", {})[name] = response_json
-        return name, response_json if response_json is not None else body_text
+        return name, _project_report_fields(
+            fields,
+            response_json=response_json,
+            response=response,
+            context=context,
+            final_url=final_url,
+            body_text=body_text,
+        )
+
+    if isinstance(report_spec, list):
+        fields = [str(item).strip() for item in report_spec if str(item).strip()]
+        if not fields:
+            return None
+        return name, _project_report_fields(
+            fields,
+            response_json=response_json,
+            response=response,
+            context=context,
+            final_url=final_url,
+            body_text=body_text,
+        )
 
     if isinstance(report_spec, dict):
         collected: dict[str, Any] = {}
@@ -1191,24 +1283,15 @@ def _resolve_report_value(
             key = str(var_name).strip()
             if not key:
                 continue
-            source_name = save_source_name(source)
-            if source_name.startswith("json."):
-                collected[key] = None if response_json is None else path_get(response_json, source_name[5:], None)
-            elif source_name.startswith("headers.") and response is not None:
-                collected[key] = response.headers.get(source_name[8:])
-            elif source_name == "final_url":
-                collected[key] = final_url or (response.url if response is not None else None)
-            elif source_name == "status_code" and response is not None:
-                collected[key] = response.status_code
-            elif source_name == "body":
-                collected[key] = body_text
-            elif source_name.startswith("vars."):
-                collected[key] = path_get(context.get("vars", {}), source_name[5:], None)
-            elif source_name in (context.get("vars") or {}):
-                collected[key] = context["vars"][source_name]
-            else:
-                collected[key] = source
-        return step_name, collected
+            collected[key] = _collect_report_source(
+                source,
+                response_json=response_json,
+                response=response,
+                context=context,
+                final_url=final_url,
+                body_text=body_text,
+            )
+        return name, collected
 
     return None
 

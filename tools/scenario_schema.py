@@ -286,6 +286,12 @@ def _check_step(step: Any, path: str, errors: list[str]) -> None:
         elif isinstance(report, str):
             if not report.strip():
                 errors.append(f"{path}.report must be a non-empty string when set as text")
+        elif isinstance(report, list):
+            if not report:
+                errors.append(f"{path}.report must list at least one response field")
+            for index, item in enumerate(report):
+                if not isinstance(item, str) or not item.strip():
+                    errors.append(f"{path}.report[{index}] must be a non-empty field name")
         elif isinstance(report, dict):
             for key, item in report.items():
                 if not str(key).strip():
@@ -293,7 +299,9 @@ def _check_step(step: Any, path: str, errors: list[str]) -> None:
                 if not isinstance(item, str):
                     errors.append(f"{path}.report.{key} must be a string source")
         else:
-            errors.append(f"{path}.report must be true, false, a string name, or an object of save sources")
+            errors.append(
+                f"{path}.report must be true, false, a field list/string, or an object of save sources"
+            )
 
 
 def _check_auth(value: Any, path: str, errors: list[str]) -> None:

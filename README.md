@@ -299,7 +299,7 @@ Use Insomnia-style placeholders in your step URLs, headers, and bodies:
 
 ### Step reports (run Output)
 
-HTTP (and poll) step responses are included in the Results **Output** dialog by default. Foreach iterations appear as separate items. Use `report` to rename, shape, or hide an entry:
+HTTP (and poll) step responses are included in the Results **Output** dialog by default. Foreach iterations appear as separate items. Use the include toggle and optional **Report as** fields to shape or hide an entry:
 
 ```json
 {
@@ -307,7 +307,7 @@ HTTP (and poll) step responses are included in the Results **Output** dialog by 
   "method": "POST",
   "path": "/register",
   "save_response_as": "registration",
-  "report": true,
+  "report": ["client_id", "client_secret"],
   "expected_status": [200, 201]
 }
 ```
@@ -316,13 +316,12 @@ HTTP (and poll) step responses are included in the Results **Output** dialog by 
 
 | Value | Effect |
 |---|---|
-| *(omitted)* | Include the response (default for steps that return a body/status) |
-| `true` | Same as omitted; name comes from `save_response_as` or the step name |
-| `"registration"` | Include in Output **and** save the response to `vars.registration` (like `save_response_as`) |
-| `{ "client_id": "{{ json.client_id }}", "status": "status_code" }` | Include a small object built from response/vars sources |
+| *(omitted)* / `true` | Include the full response (default) |
+| `"client_id, client_secret"` or `["client_id", "client_secret"]` | Include only those response fields in Output |
+| `{ "client_id": "{{ json.client_id }}", "status": "status_code" }` | Advanced: build Output from response/header/vars sources |
 | `false` | Opt out of Output (still can use `save` / `save_response_as` for chaining) |
 
-Results table is **Scenario / Result / Output**. The Output dialog lists every reported item from that scenario.
+Entry names come from `save_response_as` or the step name. Results table is **Scenario / Result / Output**.
 
 ### Foreach (iterate a step over a list)
 

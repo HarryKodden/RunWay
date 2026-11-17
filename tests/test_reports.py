@@ -81,14 +81,34 @@ def test_no_response_without_report_is_skipped():
     assert context["reports"] == []
 
 
-def test_apply_report_string_also_saves_var():
+def test_apply_report_fields_project_response_attributes():
     context: dict = {"vars": {}, "reports": []}
-    payload = {"access_token": "t"}
-    step = {"name": "token", "report": "token_response"}
+    payload = {
+        "client_id": "abc",
+        "client_secret": "s3cret",
+        "redirect_uris": ["https://app.example/cb"],
+    }
+    response = requests.Response()
+    response.status_code = 201
+    step = {"name": "register", "report": "client_id, client_secret"}
+    apply_report(step, response_json=payload, response=response, context=context, ok=True)
+    assert context["reports"][0]["name"] == "register"
+    assert context["reports"][0]["value"] == {
+        "client_id": "abc",
+        "client_secret": "s3cret",
+    }
+
+
+def test_apply_report_field_list_projects_nested_paths():
+    context: dict = {"vars": {}, "reports": []}
+    payload = {"client_id": "abc", "meta": {"region": "eu"}}
+    step = {"name": "register", "save_response_as": "registration", "report": ["client_id", "meta.region"]}
     apply_report(step, response_json=payload, response=None, context=context, ok=True)
-    assert context["vars"]["token_response"] == payload
-    assert context["reports"][0]["name"] == "token_response"
-    assert context["reports"][0]["value"] == payload
+    assert context["reports"][0]["name"] == "registration"
+    assert context["reports"][0]["value"] == {
+        "client_id": "abc",
+        "meta.region": "eu",
+    }
 
 
 def test_apply_report_object_collects_fields():
@@ -148,7 +168,7 @@ def test_run_step_collects_report_with_foreach(monkeypatch):
             "path": "https://as.example.org/register",
             "foreach": "{{ constants.ids }}",
             "json": {"client_id": "{{ item }}"},
-            "report": "registration",
+            "report": ["client_id"],
             "expected_status": 201,
         },
         "",
@@ -165,9 +185,16 @@ def test_run_step_collects_report_with_foreach(monkeypatch):
 
 def test_schema_accepts_report_shapes():
     validate_scenario_document({"steps": [{"method": "GET", "path": "/", "report": True}]})
-    validate_scenario_document({"steps": [{"method": "GET", "path": "/", "report": "registration"}]})
+    validate_scenario_document(
+        {"steps": [{"method": "GET", "path": "/", "report": "client_id, client_secret"}]}
+    )
+    validate_scenario_document(
+        {"steps": [{"method": "GET", "path": "/", "report": ["client_id", "client_secret"]}]}
+    )
     validate_scenario_document(
         {"steps": [{"method": "GET", "path": "/", "report": {"id": "{{ json.id }}"}}]}
     )
     with pytest.raises(ScenarioValidationError):
         validate_scenario_document({"steps": [{"method": "GET", "path": "/", "report": 1}]})
+    with pytest.raises(ScenarioValidationError):
+        validate_scenario_document({"steps": [{"method": "GET", "path": "/", "report": []}]})
