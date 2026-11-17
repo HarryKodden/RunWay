@@ -57,6 +57,30 @@ def test_report_false_opts_out_of_save_response_as_reporting():
     assert context["reports"] == []
 
 
+def test_http_response_reported_by_default():
+    context: dict = {"vars": {}, "reports": []}
+    response = requests.Response()
+    response.status_code = 200
+    payload = {"client_ids": ["a", "b"], "count": 2}
+    step = {"name": "Clients"}
+    apply_report(step, response_json=payload, response=response, context=context, ok=True)
+    assert len(context["reports"]) == 1
+    assert context["reports"][0]["step"] == "Clients"
+    assert context["reports"][0]["value"] == payload
+
+
+def test_no_response_without_report_is_skipped():
+    context: dict = {"vars": {}, "reports": []}
+    apply_report(
+        {"name": "exec"},
+        response_json=None,
+        response=None,
+        context=context,
+        ok=True,
+    )
+    assert context["reports"] == []
+
+
 def test_apply_report_string_also_saves_var():
     context: dict = {"vars": {}, "reports": []}
     payload = {"access_token": "t"}

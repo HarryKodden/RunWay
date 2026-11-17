@@ -101,16 +101,20 @@ def test_bruno_detection_and_bodies():
         }
     )
     assert imported["selected_environment"] == "dev"
+    assert imported["name"] == "Users"
     assert imported["description"] == "docs"
-    assert any(step["name"].startswith("Users / ") for step in imported["steps"])
-    create = next(step for step in imported["steps"] if step["name"].endswith("create"))
+    assert {step["name"] for step in imported["steps"]} >= {"list", "create", "form", "text"}
+    create = next(step for step in imported["steps"] if step["name"] == "create")
     assert create["json"] == {"name": "Ada"}
     assert create["auth"]["type"] == "bearer"
-    form = next(step for step in imported["steps"] if step["name"].endswith("form"))
+    form = next(step for step in imported["steps"] if step["name"] == "form")
     assert form["data"] == {"a": "1"}
     assert form["auth"]["type"] == "basic"
-    text = next(step for step in imported["steps"] if step["name"].endswith("text"))
+    text = next(step for step in imported["steps"] if step["name"] == "text")
     assert text["data"] == "hello"
+    assert bruno_suggested_name(
+        {"name": "OAuth2 Server", "items": [{"type": "folder", "name": "Clients", "items": []}]}
+    ) == "Clients"
 
 
 def test_openapi_detection_refs_and_swagger2():

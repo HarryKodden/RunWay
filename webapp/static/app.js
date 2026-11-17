@@ -2432,7 +2432,8 @@ function renderStepDetail() {
     stepReportAsInput.value = typeof step.report === 'string' ? step.report : '';
   }
   if (stepReportInput) {
-    stepReportInput.checked = step.report === true || (typeof step.report === 'string' && Boolean(step.report.trim()));
+    // Absent report → included by default in the runner; only false opts out.
+    stepReportInput.checked = step.report !== false;
     stepReportInput.disabled = Boolean(typeof step.report === 'object' && step.report && !Array.isArray(step.report));
   }
   if (stepForeachInput) {
@@ -4613,7 +4614,7 @@ function outputKeyFor(name, index) {
 
 function formatReportsForDialog(reports, title) {
   if (!Array.isArray(reports) || reports.length === 0) {
-    return 'No reported output.';
+    return 'No reported output.\n\nHTTP step responses are included by default. Set "report": false on a step to hide it.';
   }
   const blocks = reports.map((entry, index) => {
     const stepLabel = entry?.step || `step_${index + 1}`;
@@ -4631,7 +4632,9 @@ function formatReportsForDialog(reports, title) {
     const body = typeof value === 'string' ? value : JSON.stringify(value ?? null, null, 2);
     return `${titleLine}\n${body}`;
   });
-  const heading = title ? `# ${title}\n# ${reports.length} item${reports.length === 1 ? '' : 's'}\n` : '';
+  const heading = title
+    ? `# ${title}\n# ${reports.length} item${reports.length === 1 ? '' : 's'}\n`
+    : `# ${reports.length} item${reports.length === 1 ? '' : 's'}\n`;
   return `${heading}\n${blocks.join('\n\n----------\n\n')}`;
 }
 
@@ -4660,11 +4663,10 @@ function renderPassFailList(summary) {
   if (children) {
     const rows = passFailRows(children.map((child, index) => {
       const name = child.name || child.file || `scenario_${index + 1}`;
-      const key = outputKeyFor(name, index);
       return {
         name,
         ok: scenarioTotalsPassed(child.totals),
-        outputKey: key,
+        outputKey: outputKeyFor(name, index),
       };
     }));
     return `<table class="results-table">
@@ -4676,39 +4678,50 @@ function renderPassFailList(summary) {
   if (!steps.length) {
     return '<p class="muted">No steps in this run.</p>';
   }
-  // One row per step so each reported step has its own Output button.
-  const rows = passFailRows(steps.map((step, index) => {
-    const name = step.name || `step_${index + 1}`;
-    return {
-      name,
-      ok: (step.failure || 0) === 0 && (step.expected_mismatch || 0) === 0,
-      outputKey: outputKeyFor(name, index),
-    };
-  }));
+  const scenarioName = scenario.name || scenario.file || 'scenario';
+  const rows = passFailRows([{
+    name: scenarioName,
+    ok: scenarioTotalsPassed(scenario.totals) || (
+      (scenario.totals?.failure || 0) === 0
+      && (scenario.totals?.expected_mismatch || 0) === 0
+      && steps.every((step) => (step.failure || 0) === 0 && (step.expected_mismatch || 0) === 0)
+    ),
+    outputKey: outputKeyFor(scenarioName, 0),
+  }]);
   return `<table class="results-table">
-    <thead><tr><th>Step</th><th>Result</th><th>Output</th></tr></thead>
+    <thead><tr><th>Scenario</th><th>Result</th><th>Output</th></tr></thead>
     <tbody>${rows}</tbody>
   </table>`;
 }
 
 function reportsFromScenarioResult(result) {
-  if (Array.isArray(result?.reports) && result.reports.length > 0) {
-    return result.reports;
-  }
-  const fromVars = [];
+  const reports = Array.isArray(result?.reports) ? [...result.reports] : [];
+  const seen = new Set(
+    reports.map((entry) => `${entry?.step || ''}\0${entry?.name || ''}\0${entry?.index ?? ''}`),
+  );
   const varsMap = result?.vars && typeof result.vars === 'object' ? result.vars : {};
   Object.entries(varsMap).forEach(([key, value]) => {
     if (key === 'worker_id' || key.startsWith('_')) {
       return;
     }
-    fromVars.push({
+    // Skip values already present as a report name/step from apply_report.
+    const already = reports.some((entry) => entry?.name === key || entry?.step === key);
+    if (already) {
+      return;
+    }
+    const marker = `\0${key}\0`;
+    if (seen.has(marker)) {
+      return;
+    }
+    seen.add(marker);
+    reports.push({
       step: key,
       name: key,
       value,
     });
   });
-  if (fromVars.length) {
-    return fromVars;
+  if (reports.length) {
+    return reports;
   }
   return (result?.steps || []).map((step) => ({
     step: step.name || 'step',
@@ -4721,16 +4734,6 @@ function reportsFromScenarioResult(result) {
       failure: step.failure,
     },
   }));
-}
-
-function reportsForStep(reports, stepName) {
-  const wanted = String(stepName || '');
-  const matched = (reports || []).filter((entry) => String(entry?.step || '') === wanted);
-  if (matched.length) {
-    return matched;
-  }
-  // Fallback when report entries were keyed by save_response_as name only.
-  return (reports || []).filter((entry) => String(entry?.name || '') === wanted);
 }
 
 function rememberRunOutputs(summary) {
@@ -4753,18 +4756,14 @@ function rememberRunOutputs(summary) {
     });
     return;
   }
-  const allReports = reportsFromScenarioResult(scenario);
-  const steps = Array.isArray(scenario.steps) ? scenario.steps : [];
-  steps.forEach((step, index) => {
-    const name = step.name || `step_${index + 1}`;
-    lastRunOutputByKey.set(
-      outputKeyFor(name, index),
-      {
-        title: name,
-        reports: reportsForStep(allReports, name),
-      },
-    );
-  });
+  const name = scenario.name || scenario.file || 'scenario';
+  lastRunOutputByKey.set(
+    outputKeyFor(name, 0),
+    {
+      title: name,
+      reports: reportsFromScenarioResult(scenario),
+    },
+  );
 }
 
 function openOutputDialog(outputKey) {
@@ -4773,13 +4772,13 @@ function openOutputDialog(outputKey) {
     return;
   }
   if (outputDialogTitle) {
-    outputDialogTitle.textContent = entry.title || 'Output';
+    outputDialogTitle.textContent = entry.title || 'Scenario output';
   }
   if (outputDialogHelp) {
     const count = Array.isArray(entry.reports) ? entry.reports.length : 0;
     outputDialogHelp.textContent = count
-      ? `${count} reported item${count === 1 ? '' : 's'}`
-      : 'No reported output for this step';
+      ? `${count} reported item${count === 1 ? '' : 's'} from this scenario`
+      : 'No reported output for this scenario';
   }
   outputDialogBody.textContent = formatReportsForDialog(entry.reports, entry.title);
   outputDialog.classList.remove('hidden');
@@ -5811,10 +5810,11 @@ function syncStepReportField(step) {
     return;
   }
   if (stepReportInput?.checked) {
-    step.report = true;
+    // Default-on: omit the key so JSON stays clean; runner still reports.
+    delete step.report;
     return;
   }
-  delete step.report;
+  step.report = false;
 }
 if (stepReportAsInput) {
   bindStepField(stepReportAsInput, (step) => {

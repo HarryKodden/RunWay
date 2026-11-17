@@ -299,7 +299,7 @@ Use Insomnia-style placeholders in your step URLs, headers, and bodies:
 
 ### Step reports (run Output)
 
-Mark steps whose responses should appear in the Results **Output** dialog after a run:
+HTTP (and poll) step responses are included in the Results **Output** dialog by default. Foreach iterations appear as separate items. Use `report` to rename, shape, or hide an entry:
 
 ```json
 {
@@ -316,22 +316,19 @@ Mark steps whose responses should appear in the Results **Output** dialog after 
 
 | Value | Effect |
 |---|---|
-| `true` | Include the response in Output (named from `save_response_as` or the step name) |
+| *(omitted)* | Include the response (default for steps that return a body/status) |
+| `true` | Same as omitted; name comes from `save_response_as` or the step name |
 | `"registration"` | Include in Output **and** save the response to `vars.registration` (like `save_response_as`) |
 | `{ "client_id": "{{ json.client_id }}", "status": "status_code" }` | Include a small object built from response/vars sources |
-| `false` | Opt out (useful when you only want `save_response_as` for chaining) |
+| `false` | Opt out of Output (still can use `save` / `save_response_as` for chaining) |
 
-`save_response_as` alone also feeds the Output dialog (same as `"report": true`).
-
-Results table:
-- Collection run: **Scenario / Result / Output** — Output lists every reported step in that scenario
-- Single scenario: **Step / Result / Output** — each step has its own Output button
-
-Foreach iterations appear as separate items under that step.
+Results table is **Scenario / Result / Output**. The Output dialog lists every reported item from that scenario.
 
 ### Foreach (iterate a step over a list)
 
 Set `foreach` on a step to a list from constants or the environment (or a literal array). The step runs once per item. Inside the step, use `{{ item }}`, `{{ item.field }}`, and `{{ index }}` (0-based).
+
+Bruno import keeps an explicit `foreach` on the request when present. If a request uses `{{item}}` / `{{item.field}}` without `foreach`, import infers `{{ env.issuers }}` or `{{ env.wallets }}`. Environment values that look like JSON or Python lists (e.g. Bruno text vars) are parsed into real lists.
 
 ```json
 {

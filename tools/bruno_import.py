@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import ast
 import json
+import re
 from typing import Any
 from urllib.parse import urlencode
 
+from tools.scenario_runner import coerce_structured_value
 
 _HTTP_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"})
+_ITEM_FIELD_RE = re.compile(r"\{\{\s*item\.")
+_ITEM_BARE_RE = re.compile(r"\{\{\s*item\s*(?::[^}]*)?\}\}")
 
 
 def is_bruno_collection(payload: dict[str, Any]) -> bool:
@@ -129,6 +134,116 @@ def _auth_from_bruno(request: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+def _parse_status_assertion(value: str) -> Any | None:
+    text = str(value or "").strip()
+    if not text.lower().startswith("eq "):
+        return None
+    rest = text[3:].strip()
+    if not rest:
+        return None
+    if rest[0] in "[(":
+        try:
+            parsed = json.loads(rest.replace("(", "[").replace(")", "]"))
+            if isinstance(parsed, list):
+                return parsed
+        except Exception:
+            pass
+        try:
+            parsed = ast.literal_eval(rest)
+            if isinstance(parsed, (list, tuple)):
+                return list(parsed)
+        except Exception:
+            return None
+        return None
+    try:
+        return int(rest)
+    except Exception:
+        return rest
+
+
+def _expected_status_from_bruno(request: dict[str, Any]) -> Any | None:
+    assertions = request.get("assertions")
+    if not isinstance(assertions, list):
+        return None
+    for entry in assertions:
+        if not isinstance(entry, dict) or entry.get("enabled") is False:
+            continue
+        if str(entry.get("name") or "").strip() != "res.status":
+            continue
+        parsed = _parse_status_assertion(str(entry.get("value") or ""))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _step_uses_item(step: dict[str, Any]) -> tuple[bool, bool]:
+    """Return (uses_bare_item, uses_item_field)."""
+    blob = json.dumps(step, default=str)
+    return bool(_ITEM_BARE_RE.search(blob)), bool(_ITEM_FIELD_RE.search(blob))
+
+
+def _infer_foreach(step: dict[str, Any], env_keys: set[str]) -> str | None:
+    uses_bare, uses_field = _step_uses_item(step)
+    if uses_field:
+        if "wallets" in env_keys:
+            return "{{ env.wallets }}"
+        return "{{ env.wallets }}"
+    if uses_bare:
+        if "issuers" in env_keys:
+            return "{{ env.issuers }}"
+        return "{{ env.issuers }}"
+    return None
+
+
+def _is_folder_item(item: dict[str, Any]) -> bool:
+    item_type = str(item.get("type") or "")
+    return item_type == "folder" or (isinstance(item.get("items"), list) and "request" not in item)
+
+
+def _step_from_bruno_item(item: dict[str, Any], *, name: str) -> dict[str, Any] | None:
+    item_type = str(item.get("type") or "")
+    if item_type == "graphql-request":
+        return None
+    request = item.get("request")
+    if not isinstance(request, dict):
+        return None
+    method = str(request.get("method") or "GET").upper()
+    if method not in _HTTP_METHODS:
+        return None
+    step: dict[str, Any] = {
+        "name": name,
+        "method": method,
+        "path": _path_from_bruno_request(request),
+    }
+    headers = _headers_from_bruno(request)
+    if headers:
+        step["headers"] = headers
+    payload_json, payload_data = _body_from_bruno(request)
+    if payload_json is not None:
+        step["json"] = payload_json
+    elif payload_data is not None:
+        step["data"] = payload_data
+    auth = _auth_from_bruno(request)
+    if auth:
+        step["auth"] = auth
+    docs = str(request.get("docs") or "").strip()
+    if docs:
+        step["description"] = docs
+    expected = _expected_status_from_bruno(request)
+    if expected is not None:
+        step["expected_status"] = expected
+    settings = item.get("settings") if isinstance(item.get("settings"), dict) else {}
+    if settings.get("followRedirects") is True:
+        step["follow_redirects"] = True
+    if item.get("foreach") is not None:
+        step["foreach"] = item.get("foreach")
+    if item.get("save_response_as"):
+        step["save_response_as"] = str(item.get("save_response_as")).strip()
+    if "report" in item:
+        step["report"] = item.get("report")
+    return step
+
+
 def _flatten_bruno_items(items: Any, prefix: str = "") -> list[dict[str, Any]]:
     if not isinstance(items, list):
         return []
@@ -137,46 +252,21 @@ def _flatten_bruno_items(items: Any, prefix: str = "") -> list[dict[str, Any]]:
         if not isinstance(item, dict):
             continue
         name = str(item.get("name") or "request").strip() or "request"
-        item_type = str(item.get("type") or "")
-        if item_type == "folder" or (isinstance(item.get("items"), list) and "request" not in item):
+        if _is_folder_item(item):
             nested_prefix = f"{prefix}{name} / " if prefix or name else prefix
             flat.extend(_flatten_bruno_items(item.get("items"), nested_prefix))
             continue
-        if item_type == "graphql-request":
-            continue
-        request = item.get("request")
-        if not isinstance(request, dict):
-            continue
-        method = str(request.get("method") or "GET").upper()
-        if method not in _HTTP_METHODS:
-            continue
         step_name = f"{prefix}{name}" if prefix else name
-        step: dict[str, Any] = {
-            "name": step_name,
-            "method": method,
-            "path": _path_from_bruno_request(request),
-        }
-        headers = _headers_from_bruno(request)
-        if headers:
-            step["headers"] = headers
-        payload_json, payload_data = _body_from_bruno(request)
-        if payload_json is not None:
-            step["json"] = payload_json
-        elif payload_data is not None:
-            step["data"] = payload_data
-        auth = _auth_from_bruno(request)
-        if auth:
-            step["auth"] = auth
-        docs = str(request.get("docs") or "").strip()
-        if docs:
-            step["description"] = docs
-        flat.append(step)
+        step = _step_from_bruno_item(item, name=step_name)
+        if step is not None:
+            flat.append(step)
     return flat
 
 
-def _environments_from_bruno(payload: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], str]:
+def _environments_from_bruno(payload: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], str, set[str]]:
     environments: dict[str, dict[str, Any]] = {}
     selected = ""
+    all_keys: set[str] = set()
     for entry in payload.get("environments") or []:
         if not isinstance(entry, dict):
             continue
@@ -188,25 +278,63 @@ def _environments_from_bruno(payload: dict[str, Any]) -> tuple[dict[str, dict[st
             key = str(variable.get("name") or "").strip()
             if not key:
                 continue
-            values[key] = "" if variable.get("value") is None else str(variable.get("value"))
+            raw = "" if variable.get("value") is None else variable.get("value")
+            values[key] = coerce_structured_value(raw if isinstance(raw, str) else str(raw))
+            all_keys.add(key)
         environments[name] = values
         if not selected:
             selected = name
-    return environments, selected
+    return environments, selected, all_keys
+
+
+def _apply_inferred_foreach(steps: list[dict[str, Any]], env_keys: set[str]) -> None:
+    for step in steps:
+        if step.get("foreach") is not None:
+            continue
+        inferred = _infer_foreach(step, env_keys)
+        if inferred:
+            step["foreach"] = inferred
 
 
 def convert_bruno_collection(payload: dict[str, Any]) -> dict[str, Any]:
-    steps = _flatten_bruno_items(payload.get("items"))
+    environments, selected, env_keys = _environments_from_bruno(payload)
+    top_items = payload.get("items") if isinstance(payload.get("items"), list) else []
+    folders = [item for item in top_items if isinstance(item, dict) and _is_folder_item(item)]
+    loose = [item for item in top_items if isinstance(item, dict) and not _is_folder_item(item)]
+
+    scenario_name = str(payload.get("name") or "bruno_import")
+    description = (
+        str((payload.get("root") or {}).get("docs") or "")
+        if isinstance(payload.get("root"), dict)
+        else ""
+    )
+
+    # Round-trip: one Bruno folder == one RunWay scenario (no "Folder / " prefix).
+    if len(folders) == 1 and not loose:
+        folder = folders[0]
+        scenario_name = str(folder.get("name") or scenario_name).strip() or scenario_name
+        folder_docs = ""
+        root = folder.get("root")
+        if isinstance(root, dict):
+            folder_docs = str(root.get("docs") or "").strip()
+        if folder_docs:
+            description = folder_docs
+        steps = _flatten_bruno_items(folder.get("items"), prefix="")
+    else:
+        steps = _flatten_bruno_items(top_items)
+
     if not steps:
         raise ValueError("No HTTP requests found in Bruno collection")
-    environments, selected = _environments_from_bruno(payload)
+
+    _apply_inferred_foreach(steps, env_keys)
+
     inferred_base = ""
     if selected and environments.get(selected):
         env = environments[selected]
         inferred_base = str(env.get("server") or env.get("base_url") or env.get("baseUrl") or "")
     return {
-        "name": str(payload.get("name") or "bruno_import"),
-        "description": str((payload.get("root") or {}).get("docs") or "") if isinstance(payload.get("root"), dict) else "",
+        "name": scenario_name,
+        "description": description,
         "base_url": inferred_base,
         "random_generators": {},
         "environments": environments,
@@ -216,6 +344,13 @@ def convert_bruno_collection(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def bruno_suggested_name(payload: dict[str, Any]) -> str:
+    items = payload.get("items") if isinstance(payload.get("items"), list) else []
+    folders = [item for item in items if isinstance(item, dict) and _is_folder_item(item)]
+    loose = [item for item in items if isinstance(item, dict) and not _is_folder_item(item)]
+    if len(folders) == 1 and not loose:
+        folder_name = str(folders[0].get("name") or "").strip()
+        if folder_name:
+            return folder_name
     name = str(payload.get("name") or "").strip()
     if name:
         return name

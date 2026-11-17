@@ -207,14 +207,24 @@ def step_to_bruno_item(step: dict[str, Any], seq: int) -> dict[str, Any]:
     }
     expected = step.get("expected_status")
     if expected is not None and str(expected).strip() != "":
+        if isinstance(expected, list):
+            assertion_value = f"eq {json.dumps(expected)}"
+        else:
+            assertion_value = f"eq {expected}"
         item["request"]["assertions"] = [
             {
                 "uid": bruno_uid(),
                 "name": "res.status",
-                "value": f"eq {expected}",
+                "value": assertion_value,
                 "enabled": True,
             }
         ]
+    if step.get("foreach") is not None:
+        item["foreach"] = convert_placeholders(step.get("foreach"))
+    if step.get("save_response_as"):
+        item["save_response_as"] = str(step.get("save_response_as")).strip()
+    if "report" in step:
+        item["report"] = step.get("report")
     return item
 
 
@@ -259,11 +269,17 @@ def environments_to_bruno(environments: dict[str, Any] | None) -> list[dict[str,
                 var_name = str(key or "").strip()
                 if not var_name:
                     continue
+                if isinstance(value, (dict, list)):
+                    raw_value = json.dumps(value)
+                elif value is None:
+                    raw_value = ""
+                else:
+                    raw_value = str(value)
                 variables.append(
                     {
                         "uid": bruno_uid(),
                         "name": re.sub(r"[^\w.-]+", "_", var_name).strip("._") or "var",
-                        "value": convert_placeholders("" if value is None else str(value)),
+                        "value": convert_placeholders(raw_value),
                         "enabled": True,
                         "type": "text",
                         "secret": False,

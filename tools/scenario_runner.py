@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import ipaddress
 import json
 import os
@@ -737,6 +738,26 @@ def expand_environment_values(
     return current if isinstance(current, dict) else dict(values)
 
 
+def coerce_structured_value(value: Any) -> Any:
+    """Parse JSON or Python-literal list/dict strings (common in Bruno env vars)."""
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if not text or text[0] not in "[{":
+        return value
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+    try:
+        parsed = ast.literal_eval(text)
+    except Exception:
+        return value
+    if isinstance(parsed, (list, dict, bool, int, float)) or parsed is None:
+        return parsed
+    return value
+
+
 def finalize_environment_values(
     values: dict[str, Any] | None,
     *,
@@ -745,7 +766,11 @@ def finalize_environment_values(
 ) -> dict[str, Any]:
     """Expand intra-environment placeholders and encoded companion keys."""
     env_name = str(selected_environment or "").strip()
-    prepared = expand_meta_placeholders(dict(values or {}), environment=env_name)
+    prepared = {
+        key: coerce_structured_value(item)
+        for key, item in dict(values or {}).items()
+    }
+    prepared = expand_meta_placeholders(prepared, environment=env_name)
     prepared = expand_environment_values(prepared, keys=CONNECTION_ENV_KEYS)
     resolved = ""
     for key in ("server", "base_url", "baseUrl", "url"):
@@ -1198,13 +1223,20 @@ def apply_report(
     body_text: str | None = None,
     ok: bool | None = None,
 ) -> None:
-    """Append a step report entry when `report` or `save_response_as` is set."""
+    """Append a step report entry for Output.
+
+    HTTP (and similar) responses are included by default. Set ``report: false`` to
+    opt out. Explicit ``report`` / ``save_response_as`` still customize the entry.
+    """
     if "report" in step:
         report_spec = step.get("report")
         if report_spec is False:
             return
     elif step.get("save_response_as"):
         # Combined with Save Response As: saved responses also appear in Output.
+        report_spec = True
+    elif response is not None or response_json is not None or body_text is not None:
+        # Default: every response shows up in the scenario Output dialog.
         report_spec = True
     else:
         return
@@ -1670,6 +1702,7 @@ def resolve_foreach_items(
     if "foreach" not in step:
         return None
     rendered = render_template(step.get("foreach"), context, random_generators)
+    rendered = coerce_structured_value(rendered)
     if isinstance(rendered, list):
         return rendered
     if rendered is None or rendered == "":
