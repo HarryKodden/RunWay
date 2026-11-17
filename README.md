@@ -319,8 +319,9 @@ Mark steps whose responses should appear in the Results **Output** dialog after 
 | `true` | Include the response in Output (named from `save_response_as` or the step name) |
 | `"registration"` | Include in Output **and** save the response to `vars.registration` (like `save_response_as`) |
 | `{ "client_id": "{{ json.client_id }}", "status": "status_code" }` | Include a small object built from response/vars sources |
+| `false` | Opt out (useful when you only want `save_response_as` for chaining) |
 
-The Results table shows **Scenario / Result / Output**. **Output** opens a dialog with every reported item from that scenario (including foreach iterations).
+`save_response_as` alone also feeds the Output dialog (same as `"report": true`). The Results table shows **Scenario / Result / Output**; **Output** opens the collected items (including foreach iterations).
 
 ### Foreach (iterate a step over a list)
 

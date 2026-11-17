@@ -4634,9 +4634,7 @@ function formatReportsForDialog(reports, title) {
 function passFailRows(items) {
   return items.map((item) => {
     const ok = item.ok;
-    const entry = item.outputKey ? lastRunOutputByKey.get(item.outputKey) : null;
-    const hasOutput = Boolean(entry && Array.isArray(entry.reports) && entry.reports.length > 0);
-    const outputCell = hasOutput
+    const outputCell = item.outputKey
       ? `<button type="button" class="ghost output-open-btn" data-output-key="${escapeHtml(item.outputKey)}">Output</button>`
       : '<span class="muted">—</span>';
     return `<tr class="${ok ? 'row-pass' : 'row-fail'}">
@@ -4689,6 +4687,38 @@ function renderPassFailList(summary) {
   </table>`;
 }
 
+function reportsFromScenarioResult(result) {
+  if (Array.isArray(result?.reports) && result.reports.length > 0) {
+    return result.reports;
+  }
+  const fromVars = [];
+  const varsMap = result?.vars && typeof result.vars === 'object' ? result.vars : {};
+  Object.entries(varsMap).forEach(([key, value]) => {
+    if (key === 'worker_id' || key.startsWith('_')) {
+      return;
+    }
+    fromVars.push({
+      step: key,
+      name: key,
+      value,
+    });
+  });
+  if (fromVars.length) {
+    return fromVars;
+  }
+  return (result?.steps || []).map((step) => ({
+    step: step.name || 'step',
+    name: step.name || 'step',
+    ok: (step.failure || 0) === 0 && (step.expected_mismatch || 0) === 0,
+    status_code: step.last_status,
+    value: step.last_error || {
+      status: step.last_status,
+      success: step.success,
+      failure: step.failure,
+    },
+  }));
+}
+
 function rememberRunOutputs(summary) {
   lastRunOutputByKey = new Map();
   const scenario = summary?.scenario;
@@ -4703,7 +4733,7 @@ function rememberRunOutputs(summary) {
         outputKeyFor(name, index),
         {
           title: name,
-          reports: Array.isArray(child.reports) ? child.reports : [],
+          reports: reportsFromScenarioResult(child),
         },
       );
     });
@@ -4714,7 +4744,7 @@ function rememberRunOutputs(summary) {
     outputKeyFor(name, 0),
     {
       title: name,
-      reports: Array.isArray(scenario.reports) ? scenario.reports : [],
+      reports: reportsFromScenarioResult(scenario),
     },
   );
 }

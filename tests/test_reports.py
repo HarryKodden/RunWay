@@ -38,6 +38,25 @@ def test_apply_report_true_uses_save_response_as_name():
     ]
 
 
+def test_save_response_as_alone_is_reported():
+    context: dict = {"vars": {}, "reports": []}
+    payload = {"client_id": "abc"}
+    response = requests.Response()
+    response.status_code = 201
+    step = {"name": "register", "save_response_as": "registration"}
+    apply_save(step, payload, response, context, body_text="{}")
+    apply_report(step, response_json=payload, response=response, context=context, ok=True)
+    assert context["reports"][0]["name"] == "registration"
+    assert context["reports"][0]["value"] == payload
+
+
+def test_report_false_opts_out_of_save_response_as_reporting():
+    context: dict = {"vars": {}, "reports": []}
+    step = {"name": "register", "save_response_as": "registration", "report": False}
+    apply_report(step, response_json={"a": 1}, response=None, context=context, ok=True)
+    assert context["reports"] == []
+
+
 def test_apply_report_string_also_saves_var():
     context: dict = {"vars": {}, "reports": []}
     payload = {"access_token": "t"}

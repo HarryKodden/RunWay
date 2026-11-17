@@ -1198,8 +1198,15 @@ def apply_report(
     body_text: str | None = None,
     ok: bool | None = None,
 ) -> None:
-    """Append a step report entry when `report` is set on the step."""
-    if "report" not in step:
+    """Append a step report entry when `report` or `save_response_as` is set."""
+    if "report" in step:
+        report_spec = step.get("report")
+        if report_spec is False:
+            return
+    elif step.get("save_response_as"):
+        # Combined with Save Response As: saved responses also appear in Output.
+        report_spec = True
+    else:
         return
     resolved = _resolve_report_value(
         step,
@@ -1208,7 +1215,7 @@ def apply_report(
         context=context,
         final_url=final_url,
         body_text=body_text,
-        report_spec=step.get("report"),
+        report_spec=report_spec,
     )
     if resolved is None:
         return
