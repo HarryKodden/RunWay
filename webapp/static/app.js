@@ -2434,8 +2434,12 @@ function renderStepDetail() {
     stepReportInput.disabled = false;
   }
   if (stepReportAsInput) {
-    stepReportAsInput.value = formatReportAsInput(step.report);
     stepReportAsInput.disabled = step.report === false;
+    // Don't rewrite while typing — parsing "client_id," → ["client_id"] would
+    // strip the comma on every keystroke via renderScenarioBuilder().
+    if (document.activeElement !== stepReportAsInput) {
+      stepReportAsInput.value = formatReportAsInput(step.report);
+    }
   }
   if (stepForeachInput) {
     stepForeachInput.value = typeof step.foreach === 'string'
@@ -5832,7 +5836,7 @@ function parseReportAsInput(raw) {
   return fields.length ? fields : null;
 }
 
-function syncStepReportField(step) {
+function syncStepReportField(step, {normalizeDisplay = false} = {}) {
   if (!step) {
     return;
   }
@@ -5853,12 +5857,21 @@ function syncStepReportField(step) {
     return;
   }
   try {
-    const parsed = parseReportAsInput(raw);
-    if (parsed == null) {
-      delete step.report;
-      return;
+    // Keep the raw comma-separated text while typing so a trailing comma
+    // (e.g. "client_id,") is not immediately collapsed to ["client_id"].
+    if (!normalizeDisplay && !raw.startsWith('{') && !raw.startsWith('[')) {
+      step.report = raw;
+    } else {
+      const parsed = parseReportAsInput(raw);
+      if (parsed == null) {
+        delete step.report;
+        return;
+      }
+      step.report = parsed;
     }
-    step.report = parsed;
+    if (normalizeDisplay && stepReportAsInput && document.activeElement !== stepReportAsInput) {
+      stepReportAsInput.value = formatReportAsInput(step.report);
+    }
   } catch (error) {
     step.report = raw;
   }
@@ -5866,6 +5879,23 @@ function syncStepReportField(step) {
 if (stepReportAsInput) {
   bindStepField(stepReportAsInput, (step) => {
     syncStepReportField(step);
+  });
+  stepReportAsInput.addEventListener('blur', () => {
+    const step = getSelectedStep();
+    if (!step) {
+      return;
+    }
+    syncStepReportField(step, {normalizeDisplay: true});
+    if (Array.isArray(step.report) || (typeof step.report === 'object' && step.report)) {
+      stepReportAsInput.value = formatReportAsInput(step.report);
+    } else if (typeof step.report === 'string') {
+      const parsed = parseReportAsInput(step.report);
+      if (parsed != null) {
+        step.report = parsed;
+        stepReportAsInput.value = formatReportAsInput(step.report);
+      }
+    }
+    renderScenarioBuilder();
   });
 }
 stepReportInput?.addEventListener('change', () => {
