@@ -28,6 +28,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from tools.bruno_import import bruno_suggested_name, convert_bruno_collection, is_bruno_collection
 from tools.curl_import import parse_curl_command
 from tools.openapi_import import convert_openapi_document, is_openapi_document, openapi_suggested_name
+from tools.scenario_document import build_scenario_document, mask_sensitive_text
 from tools.scenario_schema import ScenarioValidationError, validate_scenario_document
 from tools.scenario_runner import (
     apply_save,
@@ -123,13 +124,6 @@ async def lifespan(_app: FastAPI):
     yield
 
 NO_STORE_HEADERS = {"Cache-Control": "no-store, max-age=0", "Pragma": "no-cache"}
-_BEARER_RE = re.compile(r"(?i)(authorization\s*[:=]\s*bearer\s+)([^\s\"']+)")
-
-
-def mask_sensitive_text(text: str) -> str:
-    if not text:
-        return text
-    return _BEARER_RE.sub(lambda match: match.group(1) + "***", text)
 
 
 def _json(content: Any, status_code: int = 200) -> JSONResponse:
@@ -1416,6 +1410,31 @@ def parse_curl(payload: dict[str, Any]) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     parsed["status"] = "ok"
     return parsed
+
+
+@app.post("/api/scenario-document")
+def scenario_document(
+    payload: dict[str, Any],
+    _user: User = Depends(current_user_required),
+) -> dict[str, Any]:
+    scenario = payload.get("scenario")
+    if not isinstance(scenario, dict):
+        raise HTTPException(status_code=400, detail="scenario is required")
+    collection = payload.get("collection")
+    if not isinstance(collection, dict):
+        collection = payload.get("suite")
+    overrides = payload.get("environment_overrides")
+    try:
+        document = build_scenario_document(
+            scenario,
+            selected_environment=str(payload.get("selected_environment") or "").strip() or None,
+            environment_overrides=overrides if isinstance(overrides, dict) else None,
+            base_url=str(payload.get("base_url") or "").strip() or None,
+            collection=collection if isinstance(collection, dict) else None,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"status": "ok", **document}
 
 
 @app.post("/api/preview-step")

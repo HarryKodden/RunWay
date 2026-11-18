@@ -21,6 +21,14 @@ const collectionMembers = document.getElementById('collection-members');
 const scenarioBuilder = document.getElementById('scenario-builder');
 const addStepButton = document.getElementById('add-step');
 const saveScenarioButton = document.getElementById('save-scenario');
+const documentScenarioButton = document.getElementById('document-scenario');
+const documentDialog = document.getElementById('document-dialog');
+const documentDialogTitle = document.getElementById('document-dialog-title');
+const documentDialogHelp = document.getElementById('document-dialog-help');
+const documentDialogBody = document.getElementById('document-dialog-body');
+const documentDialogCopy = document.getElementById('document-dialog-copy');
+const documentDialogClose = document.getElementById('document-dialog-close');
+const documentDialogCloseTop = document.getElementById('document-dialog-close-top');
 const runTitle = document.getElementById('run-title');
 const scenarioBaseUrl = document.getElementById('scenario-base-url');
 const scenarioEnvironmentSelect = document.getElementById('scenario-environment');
@@ -3159,6 +3167,10 @@ function renderHierarchy() {
     addStepButton.classList.toggle('hidden', viewingCollection);
     addStepButton.disabled = workspaceCollectionOpen && !editable;
   }
+  if (documentScenarioButton) {
+    documentScenarioButton.classList.toggle('hidden', viewingCollection);
+    documentScenarioButton.disabled = viewingCollection || !currentScenario || !Array.isArray(currentScenario.steps);
+  }
   if (editRandomGeneratorsJsonButton) {
     editRandomGeneratorsJsonButton.textContent = 'Edit Collection Constants';
   }
@@ -4793,6 +4805,54 @@ function closeOutputDialog() {
   outputDialog?.classList.add('hidden');
 }
 
+function closeDocumentDialog() {
+  documentDialog?.classList.add('hidden');
+}
+
+function openDocumentDialog(markdown, title) {
+  if (!documentDialog || !documentDialogBody) {
+    return;
+  }
+  if (documentDialogTitle) {
+    documentDialogTitle.textContent = title || 'Scenario document';
+  }
+  if (documentDialogHelp) {
+    documentDialogHelp.textContent = 'Documented steps, curl, validation, and environments (secrets masked)';
+  }
+  documentDialogBody.textContent = markdown || '';
+  documentDialog.classList.remove('hidden');
+}
+
+async function documentScenario() {
+  if (!currentScenario || !Array.isArray(currentScenario.steps)) {
+    return;
+  }
+  if (documentScenarioButton) {
+    documentScenarioButton.disabled = true;
+    documentScenarioButton.textContent = 'Documenting…';
+  }
+  try {
+    const result = await api('/api/scenario-document', {
+      method: 'POST',
+      body: JSON.stringify(withActiveCollection({
+        scenario: currentScenario,
+        base_url: requestBaseUrl(),
+        selected_environment: getSelectedEnvironmentName(),
+        environment_overrides: environmentOverridesPayload(),
+      })),
+    });
+    const title = result.name ? `Scenario document — ${result.name}` : 'Scenario document';
+    openDocumentDialog(result.markdown || '', title);
+  } catch (error) {
+    openDocumentDialog(String(error?.message || error || 'Document failed'), 'Scenario document');
+  } finally {
+    if (documentScenarioButton) {
+      documentScenarioButton.textContent = 'Document';
+      documentScenarioButton.disabled = false;
+    }
+  }
+}
+
 function renderLastRunResults(summary) {
   if (!reportText) {
     return;
@@ -5738,7 +5798,34 @@ outputDialogCopy?.addEventListener('click', async () => {
     outputDialogCopy.textContent = 'Copy failed';
   }
 });
+documentScenarioButton?.addEventListener('click', () => {
+  void documentScenario();
+});
+documentDialogClose?.addEventListener('click', closeDocumentDialog);
+documentDialogCloseTop?.addEventListener('click', closeDocumentDialog);
+documentDialog?.querySelector('.json-dialog-backdrop')?.addEventListener('click', closeDocumentDialog);
+documentDialogCopy?.addEventListener('click', async () => {
+  const text = documentDialogBody?.textContent || '';
+  if (!text) {
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    documentDialogCopy.textContent = 'Copied';
+    setTimeout(() => {
+      if (documentDialogCopy) {
+        documentDialogCopy.textContent = 'Copy';
+      }
+    }, 1200);
+  } catch {
+    documentDialogCopy.textContent = 'Copy failed';
+  }
+});
 document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && documentDialog && !documentDialog.classList.contains('hidden')) {
+    closeDocumentDialog();
+    return;
+  }
   if (event.key === 'Escape' && outputDialog && !outputDialog.classList.contains('hidden')) {
     closeOutputDialog();
     return;

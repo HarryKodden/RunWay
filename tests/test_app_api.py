@@ -149,6 +149,41 @@ def test_mask_sensitive_text():
     assert mask_sensitive_text("") == ""
 
 
+def test_scenario_document_endpoint_masks_secrets(client):
+    response = client.post(
+        "/api/scenario-document",
+        json={
+            "scenario": {
+                "name": "Clients",
+                "environments": {
+                    "epi": {
+                        "api_key": "super-secret-key",
+                        "server": "https://epi.as.example.org",
+                    }
+                },
+                "selected_environment": "epi",
+                "steps": [
+                    {
+                        "name": "List",
+                        "method": "GET",
+                        "path": "/clients/",
+                        "headers": {"X-API-KEY": "{{ env.api_key }}"},
+                        "expected_status": 200,
+                    }
+                ],
+            },
+            "selected_environment": "epi",
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["name"] == "Clients"
+    assert "### 1. List" in body["markdown"]
+    assert "super-secret-key" not in body["markdown"]
+    assert "`api_key`: `***`" in body["markdown"]
+
+
 def test_test_step_reports_saved_discovery_fields(client, monkeypatch):
     class _Response:
         def __init__(self, payload, url):

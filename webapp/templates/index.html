@@ -171,6 +171,7 @@
               </div>
               <div class="actions">
                 <input id="scenario-name" type="text" placeholder="folder/test.json" />
+                <button id="document-scenario" class="ghost" type="button" title="Documented report of steps, curl, validation, and environments">Document</button>
                 <button id="add-step" class="ghost">Add Step</button>
                 <button id="delete-scenario" class="ghost danger-subtle hidden" type="button">Delete Scenario</button>
                 <button id="save-scenario" class="primary">Save Scenario</button>
@@ -323,6 +324,24 @@
               <div class="actions row-end">
                 <button id="output-dialog-copy" type="button" class="ghost">Copy</button>
                 <button id="output-dialog-close" type="button" class="primary">Close</button>
+              </div>
+            </div>
+          </div>
+
+          <div id="document-dialog" class="json-dialog hidden" role="dialog" aria-modal="true" aria-labelledby="document-dialog-title">
+            <div class="json-dialog-backdrop" data-close="true"></div>
+            <div class="json-dialog-card output-dialog-card document-dialog-card">
+              <header class="modal-head section-head">
+                <div>
+                  <h2 id="document-dialog-title">Scenario document</h2>
+                  <p id="document-dialog-help" class="muted">Documented steps, curl, validation, and environments (secrets masked)</p>
+                </div>
+                <button id="document-dialog-close-top" type="button" class="icon-btn">Close</button>
+              </header>
+              <pre id="document-dialog-body" class="console output-dialog-body"></pre>
+              <div class="actions row-end">
+                <button id="document-dialog-copy" type="button" class="ghost">Copy</button>
+                <button id="document-dialog-close" type="button" class="primary">Close</button>
               </div>
             </div>
           </div>

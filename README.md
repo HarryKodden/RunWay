@@ -297,6 +297,10 @@ Use Insomnia-style placeholders in your step URLs, headers, and bodies:
 | `{{ random.gen_name }}` | configured random generator |
 | `{{ encode(vars.sample_url) }}` | URL-encode any placeholder value (for path segments / query parts) |
 
+### Scenario document
+
+In the scenario editor, **Document** opens a popup with a markdown report of the scenario: overview, constants, environments (passwords / API keys / Authorization values masked), and a paragraph per step covering flow control (`foreach`), validation, output/save behaviour, and a formatted curl preview. Use **Copy** next to **Close** to put the report on the clipboard.
+
 ### Step reports (run Output)
 
 HTTP (and poll) step responses are included in the Results **Output** dialog by default. Foreach iterations appear as separate items. Use the include toggle and optional **Report as** fields to shape or hide an entry:
