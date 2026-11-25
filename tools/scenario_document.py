@@ -11,12 +11,16 @@ from tools.scenario_runner import (
     apply_collection_defaults,
     apply_env_overrides,
     coerce_structured_value,
+    dedupe_header_names,
     environment_name_as_base_url,
     finalize_environment_values,
+    normalize_session_header_names,
     preview_step_request,
     resolve_base_url,
     resolve_environment_values,
 )
+
+_NON_REQUEST_METHODS = {"PREPARE", "EXEC", "SLEEP", "USER_AUTH"}
 
 _SENSITIVE_KEY_RE = re.compile(
     r"(pass(word|wd)?|secret|token|api[_-]?key|authorization|client_secret|access_token|"
@@ -165,6 +169,88 @@ def _describe_foreach(step: dict[str, Any], foreach_count: int | None) -> str:
     )
 
 
+def _configured_session_header_names(value: Any) -> list[str]:
+    try:
+        return normalize_session_header_names(value)
+    except ValueError:
+        return []
+
+
+def _quoted_header_names(names: list[str]) -> str:
+    return ", ".join(f"`{header_name}`" for header_name in names)
+
+
+def _is_request_step(step: dict[str, Any]) -> bool:
+    method = str(step.get("method") or "GET").upper()
+    return method not in _NON_REQUEST_METHODS
+
+
+def _step_extra_session_names(step: dict[str, Any]) -> list[str]:
+    if step.get("session_headers") is False or "session_headers" not in step:
+        return []
+    return _configured_session_header_names(step.get("session_headers"))
+
+
+def _names_captured_by_step(scenario_names: list[str], step: dict[str, Any]) -> list[str]:
+    if not _is_request_step(step):
+        return []
+    names = list(scenario_names)
+    if step.get("session_headers") is not False:
+        names.extend(_step_extra_session_names(step))
+    if not names:
+        return []
+    return dedupe_header_names(names)
+
+
+def _session_handling_lines(names: list[str]) -> list[str]:
+    if not names:
+        return []
+    example = names[0]
+    return [
+        "## Session handling",
+        "",
+        (
+            f"Response headers {_quoted_header_names(names)} are stored for the rest of this scenario "
+            "and sent on later requests. A header set on a step is used in place of the stored value. "
+            "A step can set `session_headers` to `false` to leave the stored headers off that request. "
+            f"A captured value is available as `{{{{ session.headers.{example} }}}}` "
+            f"and `{{{{ vars.{example} }}}}`."
+        ),
+        "",
+    ]
+
+
+def _describe_step_session(
+    step: dict[str, Any],
+    scenario_names: list[str],
+    already_stored: list[str],
+) -> str:
+    if not _is_request_step(step):
+        return ""
+    stored_here = _names_captured_by_step(scenario_names, step)
+    if step.get("session_headers") is False:
+        parts: list[str] = []
+        if already_stored:
+            parts.append("Skips stored session headers on this request.")
+        if stored_here:
+            parts.append(
+                f"Stores response headers {_quoted_header_names(stored_here)} for later steps."
+            )
+        return " ".join(parts)
+    if not stored_here and not already_stored:
+        return ""
+    parts: list[str] = []
+    if already_stored:
+        parts.append(
+            f"Sends stored session headers {_quoted_header_names(already_stored)} on this request."
+        )
+    if stored_here:
+        parts.append(
+            f"Stores response headers {_quoted_header_names(stored_here)} for later steps."
+        )
+    return " ".join(parts)
+
+
 def _describe_step_action(step: dict[str, Any]) -> str:
     method = str(step.get("method") or "GET").upper()
     name = str(step.get("name") or "step").strip() or "step"
@@ -309,24 +395,24 @@ def build_scenario_document(
     if description:
         lines.extend([description, ""])
 
-    session_headers = document.get("session_headers")
-    if isinstance(session_headers, list):
-        session_label = ", ".join(f"`{name}`" for name in session_headers) or "(none)"
-    elif isinstance(session_headers, str) and session_headers.strip():
-        session_label = f"`{session_headers.strip()}`"
-    else:
-        session_label = "(none)"
-    lines.extend(
-        [
-            "## Overview",
-            "",
-            f"- Steps: **{len(steps)}**",
-            f"- Selected environment: `{env_name or '(none)'}`",
-            f"- Base URL: `{base or '(none)'}`",
-            f"- Session headers: {session_label}",
-            "",
-        ]
-    )
+    scenario_session_names = _configured_session_header_names(document.get("session_headers"))
+    session_names = list(scenario_session_names)
+    for step in steps:
+        if isinstance(step, dict):
+            session_names.extend(_step_extra_session_names(step))
+    session_names = dedupe_header_names(session_names)
+    overview = [
+        "## Overview",
+        "",
+        f"- Steps: **{len(steps)}**",
+        f"- Selected environment: `{env_name or '(none)'}`",
+        f"- Base URL: `{base or '(none)'}`",
+    ]
+    if session_names:
+        overview.append(f"- Session headers: {_quoted_header_names(session_names)}")
+    overview.append("")
+    lines.extend(overview)
+    lines.extend(_session_handling_lines(session_names))
 
     lines.extend(["## Constants", ""])
     if constants:
@@ -361,6 +447,7 @@ def build_scenario_document(
         lines.append("_This scenario has no steps._")
         lines.append("")
 
+    stored_session_names: list[str] = []
     for index, step in enumerate(steps):
         step_name = str(step.get("name") or f"step_{index + 1}").strip() or f"step_{index + 1}"
         method = str(step.get("method") or "GET").upper()
@@ -368,6 +455,18 @@ def build_scenario_document(
         lines.append("")
         lines.append(_describe_step_action(step))
         lines.append("")
+        session_text = _describe_step_session(step, scenario_session_names, stored_session_names)
+        if session_text:
+            lines.append(f"**Session:** {session_text}")
+            lines.append("")
+        headers_on_request = (
+            list(stored_session_names)
+            if stored_session_names and _is_request_step(step) and step.get("session_headers") is not False
+            else []
+        )
+        stored_session_names = dedupe_header_names(
+            stored_session_names + _names_captured_by_step(scenario_session_names, step)
+        )
 
         preview: dict[str, Any] = {}
         curl = ""
@@ -413,6 +512,10 @@ def build_scenario_document(
         lines.append("**Request (curl):**")
         lines.append("")
         lines.append("```bash")
+        if headers_on_request:
+            lines.append(
+                "# Session headers added after capture: " + ", ".join(headers_on_request)
+            )
         lines.append(mask_sensitive_text(curl).rstrip() or f"# {method} (empty preview)")
         lines.append("```")
         lines.append("")

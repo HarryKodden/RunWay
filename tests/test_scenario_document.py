@@ -97,3 +97,54 @@ def test_build_scenario_document_includes_steps_foreach_and_masked_curl():
     assert "```bash" in markdown
     assert "X-API-KEY: ***" in markdown
     assert "961DA3DF-SECRET" not in markdown
+    assert "## Session handling" not in markdown
+
+
+def test_build_scenario_document_describes_session_handling():
+    result = build_scenario_document(
+        {
+            "name": "Session",
+            "session_headers": ["X-Session-Id", "X-Protocol-Version"],
+            "steps": [
+                {"name": "Start", "method": "POST", "path": "https://api.example.org/start"},
+                {
+                    "name": "Skip",
+                    "method": "POST",
+                    "path": "https://api.example.org/skip",
+                    "session_headers": False,
+                },
+                {"name": "Next", "method": "POST", "path": "https://api.example.org/next"},
+            ],
+        }
+    )
+    markdown = result["markdown"]
+    assert "## Session handling" in markdown
+    assert "- Session headers: `X-Session-Id`, `X-Protocol-Version`" in markdown
+    assert "stored for the rest of this scenario" in markdown
+    assert "{{ session.headers.X-Session-Id }}" in markdown
+    assert "{{ vars.X-Session-Id }}" in markdown
+    start, skip, nxt = markdown.split("### ")[1:]
+    assert "Stores response headers `X-Session-Id`, `X-Protocol-Version`" in start
+    assert "Sends stored session headers" not in start
+    assert "# Session headers added after capture" not in start
+    assert "Skips stored session headers on this request." in skip
+    assert "# Session headers added after capture" not in skip
+    assert "Sends stored session headers `X-Session-Id`, `X-Protocol-Version` on this request." in nxt
+    assert "# Session headers added after capture: X-Session-Id, X-Protocol-Version" in nxt
+
+
+def test_build_scenario_document_includes_collection_session_headers():
+    result = build_scenario_document(
+        {
+            "name": "child",
+            "steps": [
+                {"name": "One", "method": "GET", "path": "https://api.example.org/one"},
+                {"name": "Two", "method": "GET", "path": "https://api.example.org/two"},
+            ],
+        },
+        collection={"name": "col", "session_headers": "X-Session-Id", "scenarios": ["child.json"]},
+    )
+    markdown = result["markdown"]
+    assert "## Session handling" in markdown
+    assert "`X-Session-Id`" in markdown
+    assert "Sends stored session headers `X-Session-Id` on this request." in markdown
