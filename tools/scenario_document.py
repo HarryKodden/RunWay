@@ -180,6 +180,16 @@ def _describe_step_action(step: dict[str, Any]) -> str:
         return (
             f"**{name}** pauses the run for interactive sign-in (device code and/or authorization code)."
         )
+    if method == "MCP":
+        spec = step.get("mcp") if isinstance(step.get("mcp"), dict) else {}
+        call = str(spec.get("tool") or spec.get("method") or "JSON-RPC").strip() or "JSON-RPC"
+        target = f"`{path}`" if path else "`/mcp`"
+        return (
+            f"**{name}** calls MCP `{call}` on {target}. "
+            "The first MCP step for that URL sends initialize and notifications/initialized, "
+            "keeps Mcp-Session-Id, and reuses it for later MCP steps. "
+            "Responses may be JSON or an SSE `data:` event; the JSON-RPC message is the step result."
+        )
     target = f"`{path}`" if path else "the configured URL"
     verb = {
         "GET": "retrieves",
@@ -299,6 +309,13 @@ def build_scenario_document(
     if description:
         lines.extend([description, ""])
 
+    session_headers = document.get("session_headers")
+    if isinstance(session_headers, list):
+        session_label = ", ".join(f"`{name}`" for name in session_headers) or "(none)"
+    elif isinstance(session_headers, str) and session_headers.strip():
+        session_label = f"`{session_headers.strip()}`"
+    else:
+        session_label = "(none)"
     lines.extend(
         [
             "## Overview",
@@ -306,6 +323,7 @@ def build_scenario_document(
             f"- Steps: **{len(steps)}**",
             f"- Selected environment: `{env_name or '(none)'}`",
             f"- Base URL: `{base or '(none)'}`",
+            f"- Session headers: {session_label}",
             "",
         ]
     )

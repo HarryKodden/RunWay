@@ -35,12 +35,14 @@ from tools.scenario_runner import (
     apply_collection_defaults,
     discover_parent_collection,
     apply_env_overrides,
+    ensure_session_context,
     environment_name_as_base_url,
     expand_environment_values,
     expand_meta_placeholders,
     expand_placeholder_defaults,
     finalize_environment_values,
     missing_environment_dependencies,
+    normalize_session_header_names,
     preview_step_request,
     require_routable_api_targets,
     is_forbidden_api_host,
@@ -960,13 +962,16 @@ def _prepare_step_test(payload: dict[str, Any]) -> tuple[str, dict[str, Any], di
             require_routable_api_targets(environment_values, extra_urls=[base_url])
         except SystemExit as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-    context = {
-        "vars": {"worker_id": 1},
-        "env": environment_values,
-        "constants": constants,
-        "reports": [],
-        "meta": {"environment": env_name},
-    }
+    context = ensure_session_context(
+        {
+            "vars": {"worker_id": 1},
+            "env": environment_values,
+            "constants": constants,
+            "reports": [],
+            "meta": {"environment": env_name},
+        },
+        session_header_names=normalize_session_header_names(scenario.get("session_headers")),
+    )
     return base_url, context, random_generators if isinstance(random_generators, dict) else {}, steps
 
 

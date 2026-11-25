@@ -111,6 +111,10 @@
                   <button id="edit-environments-json" type="button" class="ghost">Edit Collection Environments</button>
                 </div>
               </label>
+              <label>Session header
+                <input id="scenario-session-headers" placeholder="X-Session-Id" />
+                <span class="muted">Response header name to remember and send on later steps. Comma-separate a second name, such as a protocol header.</span>
+              </label>
             </div>
           </section>
 
@@ -222,6 +226,7 @@
                         <option>DELETE</option>
                         <option>PATCH</option>
                         <option>HEAD</option>
+                        <option value="MCP">MCP</option>
                         <option value="USER_AUTH">USER_AUTH</option>
                       </select>
                     </label>
@@ -268,8 +273,14 @@
                       <span class="json-field-title">Sign-in settings</span>
                       <span class="json-field-flag" hidden>Set</span>
                     </button>
+                    <button id="edit-step-mcp-json" type="button" class="json-field-btn hidden" data-label="MCP call" aria-label="Edit MCP call">
+                      <span class="json-field-title">MCP call</span>
+                      <span class="json-field-flag" hidden>Set</span>
+                    </button>
                   </div>
                   <p id="step-user-auth-note" class="muted hidden">Run Tests pauses on this step so someone can sign in with a device code or the authorization code flow. Authorization code returns to this app at /scenario-auth/callback.</p>
+                  <p id="step-mcp-note" class="muted hidden">The first MCP step for a URL sends initialize and notifications/initialized, then this call. Later MCP steps to the same URL reuse Mcp-Session-Id. Save tool output from json.result. The body may be JSON or SSE. Protocol version defaults to 2024-11-05.</p>
+                  
                   <label class="toggle-row">
                     <input id="step-follow-redirects" type="checkbox" />
                     <span>Follow redirects</span>

@@ -26,6 +26,17 @@ from urllib.parse import quote, urlparse
 
 import requests
 import urllib3
+from tools.mcp_session import (
+    MCP_PROTOCOL_VERSION,
+    MCP_SESSION_HEADER,
+    absorb_session_id,
+    build_mcp_rpc,
+    jsonrpc_error,
+    mcp_request_headers,
+    mcp_session_key,
+    negotiated_protocol,
+    parse_response_document as parse_mcp_response,
+)
 from tools.oauth_helpers import (
     absolute_url,
     is_same_origin_url,
@@ -517,6 +528,105 @@ def _is_blank_resolved(value: Any) -> bool:
     return isinstance(value, str) and value.strip() == ""
 
 
+def normalize_session_header_names(value: Any) -> list[str]:
+    """Normalize a session_headers value to a list of header names."""
+    if value is None or value is False:
+        return []
+    if isinstance(value, str):
+        name = value.strip()
+        return [name] if name else []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    raise ValueError("session_headers must be a string, array of strings, or false")
+
+
+def dedupe_header_names(names: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for name in names:
+        key = name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(name)
+    return result
+
+
+def ensure_session_context(context: dict[str, Any], session_header_names: list[str] | None = None) -> dict[str, Any]:
+    """Ensure context has a session header jar used across scenario steps."""
+    session = context.get("session")
+    if not isinstance(session, dict):
+        session = {}
+        context["session"] = session
+    headers = session.get("headers")
+    if not isinstance(headers, dict):
+        session["headers"] = {}
+    if session_header_names is not None:
+        context["session_header_names"] = dedupe_header_names(
+            [str(name).strip() for name in session_header_names if str(name).strip()]
+        )
+    context.setdefault("session_header_names", [])
+    return context
+
+
+def session_capture_names(context: dict[str, Any], step: dict[str, Any] | None = None) -> list[str]:
+    names = list(context.get("session_header_names") or [])
+    if isinstance(step, dict) and "session_headers" in step and step.get("session_headers") is not False:
+        names.extend(normalize_session_header_names(step.get("session_headers")))
+    return dedupe_header_names(names)
+
+
+def session_inject_enabled(step: dict[str, Any] | None = None) -> bool:
+    if isinstance(step, dict) and step.get("session_headers") is False:
+        return False
+    return True
+
+
+def capture_session_headers(
+    response: requests.Response | None,
+    context: dict[str, Any],
+    step: dict[str, Any] | None = None,
+) -> None:
+    """Store configured response headers in the scenario session jar."""
+    if response is None:
+        return
+    ensure_session_context(context)
+    names = session_capture_names(context, step)
+    if not names:
+        return
+    jar = context["session"]["headers"]
+    vars_map = context.setdefault("vars", {})
+    for name in names:
+        value = response.headers.get(name)
+        if value is None or value == "":
+            continue
+        jar[name] = value
+        vars_map[name] = value
+
+
+def apply_session_headers(
+    headers: dict[str, str],
+    context: dict[str, Any],
+    step: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    """Merge captured session headers into the request (step headers win)."""
+    if not session_inject_enabled(step):
+        return headers
+    ensure_session_context(context)
+    jar = context.get("session", {}).get("headers") if isinstance(context.get("session"), dict) else {}
+    if not isinstance(jar, dict) or not jar:
+        return headers
+    merged = dict(headers)
+    existing = {key.lower() for key in merged}
+    for name, value in jar.items():
+        if not name or value is None or value == "":
+            continue
+        if str(name).lower() in existing:
+            continue
+        merged[str(name)] = str(value)
+    return merged
+
+
 def resolve_named_token(token: str, context: dict[str, Any], random_generators: dict[str, Any]) -> Any:
     if token.startswith("vars."):
         return path_get(context.get("vars", {}), token[5:], "")
@@ -526,6 +636,8 @@ def resolve_named_token(token: str, context: dict[str, Any], random_generators: 
         return path_get(context.get("env", {}), token[2:], "")
     if token.startswith("constants."):
         return path_get(context.get("constants", {}), token[10:], "")
+    if token.startswith("session."):
+        return path_get(context.get("session", {}), token[8:], "")
     if token == "item":
         return "" if "item" not in context or context.get("item") is None else context.get("item")
     if token.startswith("item."):
@@ -661,7 +773,17 @@ def _environment_ref_path(token: str) -> str | None:
     _encoded, inner = unwrap_encode_call(token)
     name, _default = parse_placeholder_token(inner)
     if name.startswith(
-        ("vars.", "random.", "constants.", "meta.", "json.", "headers.", "url_query.", "location_query.")
+        (
+            "vars.",
+            "random.",
+            "constants.",
+            "meta.",
+            "session.",
+            "json.",
+            "headers.",
+            "url_query.",
+            "location_query.",
+        )
     ):
         return None
     if name == "item" or name.startswith("item.") or name == "index":
@@ -1510,7 +1632,7 @@ def is_user_auth_step(step: dict[str, Any] | None) -> bool:
 
 def missing_var_tokens(step: dict[str, Any], context: dict[str, Any]) -> list[str]:
     tokens: list[str] = []
-    for key in ("path", "url", "headers", "json", "data", "auth", "command", "exec", "cwd", "prepare", "user_auth"):
+    for key in ("path", "url", "headers", "json", "data", "auth", "command", "exec", "cwd", "prepare", "user_auth", "mcp"):
         tokens.extend(collect_placeholders(step.get(key)))
     missing: list[str] = []
     vars_map = context.get("vars") if isinstance(context.get("vars"), dict) else {}
@@ -1546,6 +1668,7 @@ def build_http_request(
     payload_json = render_template(step.get("json"), context, random_generators)
     payload_data = form_encode(render_template(step.get("data"), context, random_generators))
     rendered_headers = {str(key): "" if value is None else str(value) for key, value in headers.items()}
+    rendered_headers = apply_session_headers(rendered_headers, context, step)
     return {
         "method": method,
         "url": url,
@@ -1580,6 +1703,62 @@ def format_curl_command(
     if timeout is not None:
         lines.append(f"  --max-time {shlex.quote(str(timeout))}")
     return " \\\n".join(lines)
+
+
+def _parse_sse_messages(body: str) -> list[Any]:
+    """JSON values from SSE `data:` lines. The last JSON-RPC result wins."""
+    text = str(body or "").replace("\r\n", "\n").replace("\r", "\n")
+    messages: list[Any] = []
+    for block in re.split(r"\n\n+", text):
+        data_lines: list[str] = []
+        for line in block.split("\n"):
+            if not line or line.startswith(":"):
+                continue
+            if line.startswith("data:"):
+                data_lines.append(line[5:].lstrip())
+        if not data_lines:
+            continue
+        payload = "\n".join(data_lines).strip()
+        if not payload or payload == "[DONE]":
+            continue
+        try:
+            messages.append(json.loads(payload))
+        except json.JSONDecodeError:
+            continue
+    return messages
+
+
+def parse_response_document(response: requests.Response | None) -> Any:
+    """Parse a JSON body, or the last JSON object in an SSE stream."""
+    if response is None:
+        return None
+    content_type = str(response.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+    body = response.text or ""
+    stripped = body.strip()
+    if not stripped:
+        return None
+    looks_like_sse = (
+        content_type == "text/event-stream"
+        or stripped.startswith("data:")
+        or stripped.startswith("event:")
+    )
+    if not looks_like_sse:
+        try:
+            return response.json()
+        except Exception:
+            pass
+    messages = _parse_sse_messages(body) if looks_like_sse or "\ndata:" in f"\n{stripped}" else []
+    if messages:
+        responses = [
+            message
+            for message in messages
+            if isinstance(message, dict) and ("result" in message or "error" in message)
+        ]
+        return (responses or messages)[-1]
+    try:
+        return json.loads(stripped)
+    except Exception:
+        return None
 
 
 def run_http_step(
@@ -1669,12 +1848,7 @@ def run_http_step(
             return False, True, latency_ms, None, None, None, f"{exc.__class__.__name__}: {exc}"
 
     body_text = response.text if response is not None else ""
-    response_json = None
-    try:
-        if response is not None:
-            response_json = response.json()
-    except Exception:
-        response_json = None
+    response_json = parse_response_document(response)
 
     success = evaluate_expectations(
         render_expectation_step(step, context, random_generators),
@@ -1793,6 +1967,184 @@ def resolve_foreach_items(
     raise ValueError(f"foreach must resolve to a list, got {type(rendered).__name__}")
 
 
+def _mcp_states(context: dict[str, Any]) -> dict[str, Any]:
+    ensure_session_context(context)
+    bucket = context["session"].get("mcp")
+    if not isinstance(bucket, dict):
+        bucket = {}
+        context["session"]["mcp"] = bucket
+    return bucket
+
+
+def _publish_mcp_session(context: dict[str, Any], session_id: str) -> None:
+    session_id = str(session_id or "").strip()
+    if not session_id:
+        return
+    ensure_session_context(context)
+    names = [str(name) for name in (context.get("session_header_names") or [])]
+    if not any(name.lower() == MCP_SESSION_HEADER.lower() for name in names):
+        names.append(MCP_SESSION_HEADER)
+        context["session_header_names"] = names
+    context["session"]["headers"][MCP_SESSION_HEADER] = session_id
+    context.setdefault("vars", {})[MCP_SESSION_HEADER] = session_id
+
+
+def _stamp_session_header(response: requests.Response | None, session_id: str) -> None:
+    if response is None or not session_id:
+        return
+    if not response.headers.get(MCP_SESSION_HEADER):
+        response.headers[MCP_SESSION_HEADER] = session_id
+
+
+def _post_mcp(http, url, headers, payload, timeout):
+    started = time.perf_counter()
+    try:
+        response = safe_session_request(
+            http,
+            method="POST",
+            url=url,
+            headers=headers,
+            json=payload,
+            timeout=timeout,
+            allow_redirects=False,
+        )
+    except requests.RequestException as exc:
+        return None, (time.perf_counter() - started) * 1000, f"{exc.__class__.__name__}: {exc}"
+    return response, (time.perf_counter() - started) * 1000, ""
+
+
+def _mcp_call(session, url, base_headers, active, rendered_mcp, fallback_body, timeout, total_box):
+    request_id = int(active["next_id"])
+    active["next_id"] = request_id + 1
+    payload = build_mcp_rpc(rendered_mcp, fallback_body, request_id)
+    response, latency, error = _post_mcp(
+        session, url, mcp_request_headers(base_headers, active, include_protocol=True), payload, timeout
+    )
+    total_box[0] += latency
+    return request_id, response, error
+
+
+def run_mcp_step(session, step, base_url, context, random_generators):
+    """initialize, then notifications/initialized, then this JSON-RPC call."""
+    configure_http_session(session, context.get("env") if isinstance(context.get("env"), dict) else None)
+    rendered_mcp = render_template(step.get("mcp") or {}, context, random_generators)
+    if not isinstance(rendered_mcp, dict):
+        rendered_mcp = {}
+    protocol = str(rendered_mcp.get("protocol_version") or MCP_PROTOCOL_VERSION).strip() or MCP_PROTOCOL_VERSION
+    step_for_url = step if str(step.get("path") or step.get("url") or "").strip() else {**step, "path": "/mcp"}
+    request = build_http_request(step_for_url, base_url, context, random_generators)
+    url = str(request["url"])
+    base_headers = request["headers"] if isinstance(request.get("headers"), dict) else {}
+    timeout = float(step.get("timeout", 15))
+    try:
+        ensure_safe_request_url(url)
+    except ValueError as exc:
+        message = str(exc) or ROUTABLE_HOST_HELP
+        return False, False, 0.0, {"error": message, "url": url}, None, url, message
+    try:
+        build_mcp_rpc(rendered_mcp, request.get("json"), 1)
+    except ValueError as exc:
+        return False, True, 0.0, str(exc), None, url, str(exc)
+
+    states = _mcp_states(context)
+    key = mcp_session_key(url, base_headers)
+    current = states.get(key) if isinstance(states.get(key), dict) else None
+    total = 0.0
+
+    def failed(response, parsed, body, message):
+        payload = parsed if parsed is not None else {"error": message}
+        final = response.url if response is not None else url
+        return False, True, total, payload, response, final, body or message
+
+    def handshake(force):
+        nonlocal total, current
+        if current is not None and not force:
+            return current, None
+        fresh = {"session_id": "", "protocol_version": protocol, "next_id": 1}
+        init_id = int(fresh["next_id"])
+        fresh["next_id"] = init_id + 1
+        init_body = {
+            "jsonrpc": "2.0",
+            "id": init_id,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": protocol,
+                "capabilities": {},
+                "clientInfo": {"name": "runway", "version": "0"},
+            },
+        }
+        response, latency, error = _post_mcp(
+            session, url, mcp_request_headers(base_headers, None, include_protocol=False), init_body, timeout
+        )
+        total += latency
+        if response is None:
+            return None, failed(None, None, "", error or "MCP initialize failed")
+        parsed = parse_mcp_response(response, request_id=init_id)
+        absorb_session_id(fresh, response)
+        if response.status_code >= 400 or jsonrpc_error(parsed) or parsed is None:
+            return None, failed(response, parsed, response.text or "", "MCP initialize failed")
+        fresh["protocol_version"] = negotiated_protocol(parsed, protocol)
+        note, latency, error = _post_mcp(
+            session,
+            url,
+            mcp_request_headers(base_headers, fresh, include_protocol=True),
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            timeout,
+        )
+        total += latency
+        if note is None:
+            return None, failed(None, None, "", error or "MCP initialized notification failed")
+        note_parsed = parse_mcp_response(note)
+        if note.status_code not in (200, 202, 204) or jsonrpc_error(note_parsed):
+            return None, failed(note, note_parsed, note.text or "", "MCP initialized notification failed")
+        absorb_session_id(fresh, note)
+        states[key] = fresh
+        current = fresh
+        _publish_mcp_session(context, str(fresh.get("session_id") or ""))
+        return fresh, None
+
+    opened, failure = handshake(False)
+    if failure is not None:
+        return failure
+    total_box = [total]
+    request_id, response, error = _mcp_call(
+        session, url, base_headers, opened, rendered_mcp, request.get("json"), timeout, total_box
+    )
+    total = total_box[0]
+    if response is None:
+        return failed(None, None, "", error or "MCP request failed")
+    if response.status_code == 404 and str(opened.get("session_id") or "").strip():
+        states.pop(key, None)
+        current = None
+        opened, failure = handshake(True)
+        if failure is not None:
+            return failure
+        total_box[0] = total
+        request_id, response, error = _mcp_call(
+            session, url, base_headers, opened, rendered_mcp, request.get("json"), timeout, total_box
+        )
+        total = total_box[0]
+        if response is None:
+            return failed(None, None, "", error or "MCP request failed")
+    parsed = parse_mcp_response(response, request_id=request_id)
+    body = response.text or ""
+    absorb_session_id(opened, response)
+    _publish_mcp_session(context, str(opened.get("session_id") or ""))
+    _stamp_session_header(response, str(opened.get("session_id") or ""))
+    eval_step = render_expectation_step(step, context, random_generators)
+    if "expected_status" not in step:
+        eval_step["expected_status"] = 200
+    success = evaluate_expectations(eval_step, response, parsed, body)
+    if jsonrpc_error(parsed):
+        expected = step.get("expected_json_contains")
+        rendered_expected = render_template(expected, context, random_generators) if expected is not None else None
+        if rendered_expected is None or not value_contains(parsed, rendered_expected):
+            success = False
+    elif parsed is None:
+        success = False
+    return success, (not success), total, parsed, response, response.url or url, body
+
+
 def _run_step_once(
     session: requests.Session,
     step: dict[str, Any],
@@ -1830,7 +2182,11 @@ def _run_step_once(
         time.sleep(seconds)
         return True, False, seconds * 1000, None, None
 
-    if step.get("poll"):
+    if method == "MCP":
+        success, mismatch, latency_ms, response_json, response, final_url, body_text = run_mcp_step(
+            session, step, base_url, context, random_generators
+        )
+    elif step.get("poll"):
         success, mismatch, latency_ms, response_json, response, final_url, body_text = run_poll_step(
             session, step, base_url, context, random_generators
         )
@@ -1841,6 +2197,7 @@ def _run_step_once(
 
     if response is not None:
         apply_save(step, response_json, response, context, final_url=final_url, body_text=body_text)
+        capture_session_headers(response, context, step)
 
     # Optional: on use_dpop_nonce, mint new proof and retry once
     if (
@@ -1864,6 +2221,7 @@ def _run_step_once(
             latency_ms += latency2
             if response is not None:
                 apply_save(step, response_json, response, context, final_url=final_url, body_text=body_text)
+                capture_session_headers(response, context, step)
 
     apply_report(
         step,
@@ -2042,6 +2400,38 @@ def preview_step_request(
             ]
         )
         request["url"] = curl
+    elif method == "MCP":
+        preview_step = step if str(step.get("path") or step.get("url") or "").strip() else {**step, "path": "/mcp"}
+        request = build_http_request(preview_step, base_url, context, random_generators)
+        rendered_mcp = render_template(step.get("mcp") or {}, context, random_generators)
+        protocol = MCP_PROTOCOL_VERSION
+        if isinstance(rendered_mcp, dict) and str(rendered_mcp.get("protocol_version") or "").strip():
+            protocol = str(rendered_mcp.get("protocol_version")).strip()
+        jar = context.get("session", {}).get("headers") if isinstance(context.get("session"), dict) else {}
+        session_id = str(jar.get(MCP_SESSION_HEADER) or "").strip() if isinstance(jar, dict) else ""
+        state = {"session_id": session_id, "protocol_version": protocol} if session_id else None
+        headers = mcp_request_headers(request.get("headers"), state, include_protocol=state is not None)
+        try:
+            payload = build_mcp_rpc(rendered_mcp if isinstance(rendered_mcp, dict) else {}, request.get("json"), 2)
+        except ValueError as exc:
+            payload = None
+            curl = f"# MCP: {exc}"
+        else:
+            insecure = not tls_verify_enabled(context.get("env") if isinstance(context.get("env"), dict) else None)
+            curl = format_curl_command(
+                method="POST",
+                url=request["url"],
+                headers=headers,
+                payload_json=payload,
+                timeout=float(timeout) if timeout not in (None, "") else None,
+                insecure=insecure,
+            )
+            curl = (
+                "# MCP session: initialize, then notifications/initialized, then this call.\n"
+                "# Mcp-Session-Id is captured and reused for this URL.\n"
+                + curl
+            )
+        request = {"method": "POST", "url": request["url"], "headers": headers, "json": payload, "data": None}
     else:
         request = build_http_request(step, base_url, context, random_generators)
         insecure = not tls_verify_enabled(context.get("env") if isinstance(context.get("env"), dict) else None)
@@ -2085,15 +2475,19 @@ def run_worker(
     exported_vars: dict[str, Any] | None = None,
     constants: dict[str, Any] | None = None,
     exported_reports: list[dict[str, Any]] | None = None,
+    session_header_names: list[str] | None = None,
 ) -> None:
     session = requests.Session()
-    context = {
-        "vars": {"worker_id": worker_id},
-        "env": dict(environment_values),
-        "constants": dict(constants or {}),
-        "reports": [],
-        "meta": {"environment": str(selected_environment or "")},
-    }
+    context = ensure_session_context(
+        {
+            "vars": {"worker_id": worker_id},
+            "env": dict(environment_values),
+            "constants": dict(constants or {}),
+            "reports": [],
+            "meta": {"environment": str(selected_environment or "")},
+        },
+        session_header_names=session_header_names,
+    )
 
     def capture_vars() -> None:
         with lock:
@@ -2220,6 +2614,8 @@ def apply_collection_defaults(child: dict[str, Any], collection: dict[str, Any] 
         merged["selected_environment"] = collection.get("selected_environment")
     if _is_set(collection.get("base_url")):
         merged["base_url"] = collection.get("base_url")
+    if "session_headers" not in merged and _is_set(collection.get("session_headers")):
+        merged["session_headers"] = collection.get("session_headers")
     return merged
 
 
@@ -2329,6 +2725,7 @@ def execute_scenario(
     started = time.time()
     run_until = started + max(duration, 1)
     worker_fail_fast = fail_fast or bool(scenario.get("fail_fast", False))
+    session_header_names = normalize_session_header_names(scenario.get("session_headers"))
 
     threads = [
         threading.Thread(
@@ -2348,6 +2745,7 @@ def execute_scenario(
                 "fail_fast": worker_fail_fast,
                 "exported_vars": captured_vars,
                 "exported_reports": captured_reports,
+                "session_header_names": session_header_names,
             },
             daemon=True,
         )

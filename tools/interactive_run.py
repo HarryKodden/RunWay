@@ -21,6 +21,7 @@ from tools.scenario_runner import (
     apply_env_overrides,
     apply_save,
     discover_parent_collection,
+    ensure_session_context,
     exported_context_vars,
     finalize_environment_values,
     is_collection,
@@ -28,6 +29,7 @@ from tools.scenario_runner import (
     is_user_auth_step,
     load_collection_members,
     missing_environment_dependencies,
+    normalize_session_header_names,
     now_iso,
     render_template,
     require_routable_api_targets,
@@ -387,13 +389,16 @@ def _ensure_member(session: InteractiveSession) -> None:
     session.random_generators = prepared.get("random_generators") or {}
     session.prepared_steps = [step for step in steps if isinstance(step, dict)]
     constants = prepared.get("constants") if isinstance(prepared.get("constants"), dict) else {}
-    session.context = {
-        "vars": {},
-        "env": dict(environment_values),
-        "constants": dict(constants),
-        "reports": [],
-        "meta": {"environment": environment_name},
-    }
+    session.context = ensure_session_context(
+        {
+            "vars": {},
+            "env": dict(environment_values),
+            "constants": dict(constants),
+            "reports": [],
+            "meta": {"environment": environment_name},
+        },
+        session_header_names=normalize_session_header_names(prepared.get("session_headers")),
+    )
     while len(session.member_stats) <= session.member_index:
         session.member_stats.append({})
 

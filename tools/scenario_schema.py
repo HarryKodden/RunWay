@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
-STEP_METHODS = HTTP_METHODS | {"USER_AUTH", "PREPARE", "EXEC", "SLEEP"}
+STEP_METHODS = HTTP_METHODS | {"USER_AUTH", "PREPARE", "EXEC", "SLEEP", "MCP"}
 
 SCENARIO_FIELDS = {
     "name",
@@ -21,6 +21,7 @@ SCENARIO_FIELDS = {
     "environments",
     "constants",
     "random_generators",
+    "session_headers",
     "steps",
 }
 
@@ -62,7 +63,11 @@ STEP_FIELDS = {
     "dpop_nonce_retry",
     "foreach",
     "report",
+    "session_headers",
+    "mcp",
 }
+
+MCP_FIELDS = {"tool", "arguments", "method", "params", "protocol_version"}
 
 AUTH_FIELDS = {"type", "username", "password", "token"}
 AUTH_TYPES = {"basic", "bearer"}
@@ -131,6 +136,8 @@ def _check_scenario(document: dict[str, Any], errors: list[str]) -> None:
         _check_constants(document["constants"], errors)
     if "random_generators" in document:
         _check_generators(document["random_generators"], errors)
+    if "session_headers" in document:
+        _check_session_headers(document["session_headers"], "scenario.session_headers", errors)
     steps = document.get("steps")
     if not isinstance(steps, list):
         errors.append("scenario.steps must be an array")
@@ -145,6 +152,16 @@ def _check_export_env(value: Any, errors: list[str]) -> None:
     if isinstance(value, list) and all(isinstance(item, str) and item.strip() for item in value):
         return
     errors.append('scenario.export_env must be true or an array of variable names')
+
+
+def _check_session_headers(value: Any, path: str, errors: list[str]) -> None:
+    if value is False:
+        return
+    if isinstance(value, str) and value.strip():
+        return
+    if isinstance(value, list) and all(isinstance(item, str) and item.strip() for item in value):
+        return
+    errors.append(f"{path} must be a header name, an array of header names, or false")
 
 
 def _check_environments(value: Any, errors: list[str]) -> None:
@@ -302,6 +319,44 @@ def _check_step(step: Any, path: str, errors: list[str]) -> None:
             errors.append(
                 f"{path}.report must be true, false, a field list/string, or an object of save sources"
             )
+    if "mcp" in step:
+        _check_mcp(step["mcp"], f"{path}.mcp", errors)
+    if str(step.get("method") or "").upper() == "MCP" and not _mcp_call_defined(step):
+        errors.append(f"{path} MCP step needs mcp.tool, mcp.method, or json.method")
+    if "session_headers" in step:
+        _check_session_headers(step["session_headers"], f"{path}.session_headers", errors)
+
+
+def _mcp_call_defined(step: dict[str, Any]) -> bool:
+    mcp = step.get("mcp")
+    if isinstance(mcp, dict):
+        if isinstance(mcp.get("tool"), str) and str(mcp.get("tool")).strip():
+            return True
+        if isinstance(mcp.get("method"), str) and str(mcp.get("method")).strip():
+            return True
+    body = step.get("json")
+    return isinstance(body, dict) and isinstance(body.get("method"), str) and bool(str(body.get("method")).strip())
+
+
+def _check_mcp(value: Any, path: str, errors: list[str]) -> None:
+    if not isinstance(value, dict):
+        errors.append(f"{path} must be an object")
+        return
+    _unknown_keys(value, MCP_FIELDS, path, errors)
+    if "tool" in value and "method" in value:
+        errors.append(f"{path} must set tool or method, not both")
+    for key in ("tool", "method", "protocol_version"):
+        if key not in value:
+            continue
+        item = value[key]
+        if not isinstance(item, str) or not item.strip():
+            errors.append(f"{path}.{key} must be a non-empty string")
+    if "arguments" in value and not isinstance(value["arguments"], dict):
+        errors.append(f"{path}.arguments must be an object")
+    elif isinstance(value.get("arguments"), dict) and not _is_json_value(value["arguments"]):
+        errors.append(f"{path}.arguments must be JSON")
+    if "params" in value and not _is_json_value(value["params"]):
+        errors.append(f"{path}.params must be JSON")
 
 
 def _check_auth(value: Any, path: str, errors: list[str]) -> None:

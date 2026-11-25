@@ -32,6 +32,7 @@ const documentDialogCloseTop = document.getElementById('document-dialog-close-to
 const runTitle = document.getElementById('run-title');
 const scenarioBaseUrl = document.getElementById('scenario-base-url');
 const scenarioEnvironmentSelect = document.getElementById('scenario-environment');
+const scenarioSessionHeadersInput = document.getElementById('scenario-session-headers');
 const editRandomGeneratorsJsonButton = document.getElementById('edit-random-generators-json');
 const editEnvironmentsJsonButton = document.getElementById('edit-environments-json');
 const jsonDialog = document.getElementById('json-dialog');
@@ -71,6 +72,8 @@ const editStepJsonButton = document.getElementById('edit-step-json');
 const editStepSaveJsonButton = document.getElementById('edit-step-save-json');
 const editStepExpectedJsonButton = document.getElementById('edit-step-expected-json');
 const editStepUserAuthJsonButton = document.getElementById('edit-step-user-auth-json');
+const editStepMcpJsonButton = document.getElementById('edit-step-mcp-json');
+const stepMcpNote = document.getElementById('step-mcp-note');
 const stepUserAuthNote = document.getElementById('step-user-auth-note');
 const stepFollowRedirectsInput = document.getElementById('step-follow-redirects');
 const stepStopOnFailureInput = document.getElementById('step-stop-on-failure');
@@ -705,6 +708,35 @@ function renderTreeNodes(container, nodes, depth, parentPath) {
   });
 }
 
+function formatSessionHeadersInput(value) {
+  if (value === false) {
+    return '';
+  }
+  if (typeof value === 'string') {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item || '').trim()).filter(Boolean).join(', ');
+  }
+  return '';
+}
+
+function parseSessionHeadersInput(raw) {
+  const text = String(raw || '').trim();
+  if (!text) {
+    return null;
+  }
+  if (text.startsWith('[')) {
+    const parsed = JSON.parse(text);
+    if (!Array.isArray(parsed)) {
+      throw new Error('session_headers must be a JSON array of names');
+    }
+    return parsed.map((item) => String(item || '').trim()).filter(Boolean);
+  }
+  const names = text.split(',').map((part) => part.trim()).filter(Boolean);
+  return names.length ? names : null;
+}
+
 function createEmptyScenario() {
   return {
     base_url: '',
@@ -733,7 +765,7 @@ function normalizeScenario(scenario) {
     ? scenario.selected_environment
     : '';
 
-  return {
+  const normalized = {
     ...createEmptyScenario(),
     ...scenario,
     environments: normalizedEnvironments,
@@ -744,6 +776,12 @@ function normalizeScenario(scenario) {
     random_generators: scenario?.random_generators || {},
     steps: Array.isArray(scenario?.steps) ? scenario.steps : [],
   };
+  if (Array.isArray(scenario?.session_headers) || typeof scenario?.session_headers === 'string') {
+    normalized.session_headers = scenario.session_headers;
+  } else {
+    delete normalized.session_headers;
+  }
+  return normalized;
 }
 
 function isDefinedValue(value) {
@@ -977,7 +1015,7 @@ function unwrapEncodeCall(raw) {
 function envPlaceholderPath(token) {
   const {inner} = unwrapEncodeCall(token);
   const {name} = parsePlaceholderToken(inner);
-  if (!name || name === 'item' || name.startsWith('item.') || name === 'index' || name.startsWith('vars.') || name.startsWith('random.') || name.startsWith('constants.') || name.startsWith('meta.') || name.startsWith('json.') || name.startsWith('headers.') || name.startsWith('url_query.') || name.startsWith('location_query.')) {
+  if (!name || name === 'item' || name.startsWith('item.') || name === 'index' || name.startsWith('vars.') || name.startsWith('random.') || name.startsWith('constants.') || name.startsWith('meta.') || name.startsWith('session.') || name.startsWith('json.') || name.startsWith('headers.') || name.startsWith('url_query.') || name.startsWith('location_query.')) {
     return null;
   }
   if (name.startsWith('env.')) {
@@ -1982,6 +2020,10 @@ function stepDisplaySummary(step) {
     const label = Array.isArray(flows) && flows.length ? flows.join(' or ') : 'device code or authorization code';
     return `Sign in · ${label}`;
   }
+  if (method === 'MCP') {
+    const call = step.mcp?.tool || step.mcp?.method || 'MCP';
+    return `MCP ${call} ${expandEnvPlaceholders(step.path || step.url || '/mcp')}`;
+  }
   return `${method} ${expandEnvPlaceholders(step.path || step.url || '/')}`;
 }
 
@@ -2460,8 +2502,12 @@ function renderStepDetail() {
   syncJsonFieldButton(editStepExpectedJsonButton, step.expected_json_contains);
   syncJsonFieldButton(editStepUserAuthJsonButton, step.user_auth);
   const userAuthStep = String(step.method || '').toUpperCase() === 'USER_AUTH';
+  const mcpStep = String(step.method || '').toUpperCase() === 'MCP';
   editStepUserAuthJsonButton?.classList.toggle('hidden', !userAuthStep);
   stepUserAuthNote?.classList.toggle('hidden', !userAuthStep);
+  editStepMcpJsonButton?.classList.toggle('hidden', !mcpStep);
+  stepMcpNote?.classList.toggle('hidden', !mcpStep);
+  syncJsonFieldButton(editStepMcpJsonButton, step.mcp);
   if (stepFollowRedirectsInput) {
     stepFollowRedirectsInput.checked = Boolean(step.follow_redirects);
   }
@@ -2474,6 +2520,9 @@ function renderScenarioBuilder() {
     currentScenario = createEmptyScenario();
   }
   scenarioBaseUrl.value = currentScenario.base_url || '';
+  if (scenarioSessionHeadersInput && document.activeElement !== scenarioSessionHeadersInput) {
+    scenarioSessionHeadersInput.value = formatSessionHeadersInput(currentScenario.session_headers);
+  }
   renderScenarioEnvironmentSelector();
   renderHierarchy();
   renderStepSequence();
@@ -2599,6 +2648,22 @@ function getJsonDialogConfig(target) {
           return;
         }
         step.user_auth = parsed;
+      },
+    };
+  }
+  if (target === 'step_mcp') {
+    const step = getSelectedStep();
+    if (!step) throw new Error('Select a step first.');
+    return {
+      title: 'Edit MCP Call',
+      fieldName: 'MCP call',
+      currentValue: () => step.mcp || {tool: 'whoami', arguments: {}, protocol_version: '2024-11-05'},
+      apply: (parsed) => {
+        if (parsed === undefined) {
+          delete step.mcp;
+          return;
+        }
+        step.mcp = parsed;
       },
     };
   }
@@ -5724,6 +5789,48 @@ document.getElementById('clear-session-env')?.addEventListener('click', () => {
   scheduleStepCurlPreview();
 });
 
+if (scenarioSessionHeadersInput) {
+  bindScenarioField(scenarioSessionHeadersInput, (scenario, element) => {
+    const raw = String(element.value || '').trim();
+    if (!raw) {
+      delete scenario.session_headers;
+      return;
+    }
+    // Keep raw text while typing so trailing commas survive re-render.
+    if (!raw.startsWith('[')) {
+      scenario.session_headers = raw.split(',').map((part) => part.trim()).filter(Boolean);
+      if (!scenario.session_headers.length) {
+        delete scenario.session_headers;
+      }
+      return;
+    }
+    const parsed = parseSessionHeadersInput(raw);
+    if (parsed == null || !parsed.length) {
+      delete scenario.session_headers;
+      return;
+    }
+    scenario.session_headers = parsed;
+  });
+  scenarioSessionHeadersInput.addEventListener('blur', () => {
+    if (!currentScenario) {
+      return;
+    }
+    try {
+      const parsed = parseSessionHeadersInput(scenarioSessionHeadersInput.value);
+      if (parsed == null || !parsed.length) {
+        delete currentScenario.session_headers;
+        scenarioSessionHeadersInput.value = '';
+      } else {
+        currentScenario.session_headers = parsed;
+        scenarioSessionHeadersInput.value = formatSessionHeadersInput(parsed);
+      }
+      syncScenarioPreview();
+    } catch (error) {
+      scenarioSessionHeadersInput.setCustomValidity(error.message);
+      scenarioSessionHeadersInput.reportValidity();
+    }
+  });
+}
 bindScenarioField(scenarioBaseUrl, (scenario, element) => {
   scenario.base_url = element.value.trim();
   updateRunTargetHint();
@@ -5757,6 +5864,7 @@ editStepJsonButton.addEventListener('click', () => openJsonDialog('step_json'));
 editStepSaveJsonButton.addEventListener('click', () => openJsonDialog('step_save'));
 editStepExpectedJsonButton.addEventListener('click', () => openJsonDialog('step_expected_json'));
 editStepUserAuthJsonButton?.addEventListener('click', () => openJsonDialog('step_user_auth'));
+editStepMcpJsonButton?.addEventListener('click', () => openJsonDialog('step_mcp'));
 jsonDialogCancelButton.addEventListener('click', closeJsonDialog);
 jsonDialogCancelTopButton.addEventListener('click', closeJsonDialog);
 jsonDialogSaveButton.addEventListener('click', saveJsonDialog);
@@ -5840,6 +5948,16 @@ bindStepField(stepNameInput, (step, element) => {
 });
 bindStepField(stepMethodInput, (step, element) => {
   step.method = element.value;
+  if (element.value === 'MCP') {
+    const currentPath = String(step.path || step.url || '').trim();
+    if (!currentPath || currentPath === '/health') {
+      step.path = '/mcp';
+      delete step.url;
+    }
+    if (!step.mcp || typeof step.mcp !== 'object' || Array.isArray(step.mcp)) {
+      step.mcp = {tool: 'whoami', arguments: {}, protocol_version: '2024-11-05'};
+    }
+  }
   if (element.value === 'USER_AUTH' && !step.user_auth) {
     step.user_auth = {
       flows: ['device_code', 'authorization_code'],

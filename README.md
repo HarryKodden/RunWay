@@ -301,6 +301,53 @@ Use Insomnia-style placeholders in your step URLs, headers, and bodies:
 
 In the scenario editor, **Document** opens a popup with a markdown report of the scenario: overview, constants, environments (passwords / API keys / Authorization values masked), and a paragraph per step covering flow control (`foreach`), validation, output/save behaviour, and a formatted curl preview. Use **Copy** next to **Close** to put the report on the clipboard.
 
+### Session header
+
+HTTP cookies already stick for the life of a scenario run (`requests.Session`). When an API returns a session or protocol id in a **response header** and later requests must send that same header back, set the header name on the scenario:
+
+```json
+{
+  "session_headers": "X-Session-Id"
+}
+```
+
+Use an array when more than one header should be kept, for example a session id and a protocol header:
+
+```json
+{
+  "session_headers": ["X-Session-Id", "X-Protocol-Version"]
+}
+```
+
+The same field is the **Session header** input in the scenario editor. A single name is enough; separate extra names with commas.
+
+When a listed header is present on a response, RunWay stores it for the rest of the run and adds it to later requests. A header you set on a step wins over the stored value. `{{ session.headers.X-Session-Id }}` and `{{ vars.X-Session-Id }}` read the stored value. Set a step's `"session_headers": false` to skip sending stored headers on that step.
+
+If a response is `text/event-stream` (`data: {...}`), RunWay reads that JSON so `{{ json.result }}` and other JSON saves still work.
+
+An MCP step does that handshake for you. The first MCP step for a URL sends `initialize`, then `notifications/initialized`, and keeps `Mcp-Session-Id` for later MCP steps to the same URL and Authorization value. A later HTTP 404 starts a new session once. The tool result is the JSON-RPC `result` (`{{ json.result }}`). A JSON-RPC `error` fails the step unless `expected_json_contains` matches that error. `protocol_version` defaults to `2024-11-05`.
+
+```json
+{
+  "name": "whoami",
+  "method": "MCP",
+  "path": "/mcp",
+  "headers": {
+    "Authorization": "Bearer {{ env.token }}"
+  },
+  "mcp": {
+    "protocol_version": "2024-11-05",
+    "tool": "whoami",
+    "arguments": {}
+  },
+  "save": {
+    "who": "{{ json.result }}"
+  }
+}
+```
+
+`mcp.method` plus `mcp.params` sends another JSON-RPC method, for example `tools/list` (`params` defaults to `{}`). Set `protocol_version` to `2025-03-26` or `2025-06-18` when the server requires a newer handshake.
+
 ### Step reports (run Output)
 
 HTTP (and poll) step responses are included in the Results **Output** dialog by default. Foreach iterations appear as separate items. Use the include toggle and optional **Report as** fields to shape or hide an entry:
